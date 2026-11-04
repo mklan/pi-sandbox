@@ -19,13 +19,14 @@
 # are is configured in docker-compose.yml / docker-compose.override.yml
 # and discovered here from the merged compose config — add a mount and it
 # becomes a valid session folder. A bare folder name works too when it is
-# unambiguous (a folder directly under one of the mounts, or an existing
-# session name). -b/--background starts the session without attaching.
+# unambiguous (any folder under one of the mounts is found by name, or an
+# existing session name). -b/--background starts the session without attaching.
 set -euo pipefail
 
 SERVICE_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 
-die() { printf 'run.sh: %s\n' "$*" >&2; exit 1; }
+err() { printf 'run.sh: %s\n' "$*" >&2; }
+die() { err "$*"; exit 1; }
 
 usage() {
   awk 'NR == 1 { next } !/^#/ { exit } { sub(/^# ?/, ""); print }' "$0"
@@ -122,29 +123,43 @@ host_path() {
   case "$p" in
     /workspace|/workspace/*)
       m="$(mount_for_ctr "$p")"
-      [[ -n "$m" ]] || die "$p is not a mounted folder (mounted: $(joined_ctrs))"
+      [[ -n "$m" ]] || { err "$p is not a mounted folder (mounted: $(joined_ctrs))"; return 1; }
       IFS=$'\t' read -r mh mc <<<"$m"
       p="$mh${p#"$mc"}"
       ;;
   esac
   abs="$(realpath -m "$p")"
   if [[ ! -d "$abs" && "$p" != */* && "$p" != /* ]]; then
-    # bare folder name: look for it directly under one of the mounts
+    # bare folder name: look for it under one of the mounts — first as a
+    # direct child of a mount root, then anywhere below (bounded depth,
+    # skipping hidden folders and node_modules)
     for i in "${!M_HOST[@]}"; do
       cand="${M_HOST[$i]}/$p"
-      if [[ -d "$cand" ]]; then
-        matches+=("$(realpath -m "$cand")")
-      fi
+      [[ -d "$cand" ]] && matches+=("$(realpath -m "$cand")")
     done
+    if [[ ${#matches[@]} -eq 0 ]]; then
+      for i in "${!M_HOST[@]}"; do
+        while IFS= read -r cand; do
+          matches+=("$(realpath -m "$cand")")
+        done < <(find "${M_HOST[$i]}" -maxdepth 4 \
+          \( -name '.*' -o -name node_modules \) -prune \
+          -o -type d -name "$p" -print 2>/dev/null)
+      done
+    fi
+    if [[ ${#matches[@]} -gt 1 ]]; then
+      mapfile -t matches < <(printf '%s\n' "${matches[@]}" | sort -u)
+    fi
     if [[ ${#matches[@]} -eq 1 ]]; then
       abs="${matches[0]}"
     elif [[ ${#matches[@]} -gt 1 ]]; then
-      die "ambiguous folder name '$p': ${matches[*]}"
+      err "ambiguous folder name '$p': ${matches[*]}"; return 1
+    else
+      err "unknown session or folder: $p"; return 1
     fi
   fi
-  [[ -d "$abs" ]] || die "not a directory: $p"
+  [[ -d "$abs" ]] || { err "not a directory: $p"; return 1; }
   m="$(mount_for_host "$abs")"
-  [[ -n "$m" ]] || die "outside the mounted folders ($(joined_hosts)): $abs"
+  [[ -n "$m" ]] || { err "outside the mounted folders ($(joined_hosts)): $abs"; return 1; }
   printf '%s' "$abs"
 }
 
@@ -177,12 +192,20 @@ lookup() {
   elif tmux has-session -t "=pi-$arg" 2>/dev/null; then
     name="pi-$arg"
   else
-    abs="$(host_path "$arg")"
+    abs="$(host_path "$arg")" || return 1
     printf '%s\t%s\n' "$(session_name "$abs")" "$abs"
     return
   fi
   abs="$(tmux show-options -qv -t "$name" @pi-path 2>/dev/null || true)"
   printf '%s\t%s\n' "$name" "$abs"
+}
+
+# resolve "<path|name>" into the variables named by $2 and $3; on failure
+# the reason is printed and the caller should exit without a second message
+resolve() {
+  local out
+  out="$(lookup "${1:-.}")" || return 1
+  IFS=$'\t' read -r "$2" "$3" <<<"$out"
 }
 
 attach() {
@@ -242,8 +265,8 @@ cmd_open() {
     path="."
   fi
   local abs name
-  IFS=$'\t' read -r name abs < <(lookup "$path") || true
-  [[ -n "$abs" ]] || die "unknown session or folder: $path"
+  resolve "$path" name abs || exit 1
+  [[ -n "$abs" ]] || die "no folder recorded for $path"
   if tmux has-session -t "=$name" 2>/dev/null; then
     [[ $# -gt 0 ]] && echo "note: session exists, pi args ignored" >&2
   else
@@ -314,7 +337,7 @@ cmd_ls() {
 cmd_log() {
   need_tmux
   local name abs
-  IFS=$'\t' read -r name abs < <(lookup "${1:-.}") || true
+  resolve "${1:-.}" name abs || exit 1
   tmux has-session -t "=$name" 2>/dev/null || die "no session for ${1:-$PWD}"
   tmux capture-pane -p -t "$name" -S -300
 }
@@ -336,7 +359,7 @@ cmd_kill() {
     done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep '^pi-' || true)
   else
     local name abs
-    IFS=$'\t' read -r name abs < <(lookup "${1:-.}") || true
+    resolve "${1:-.}" name abs || exit 1
     tmux has-session -t "=$name" 2>/dev/null || die "no session for ${1:-$PWD}"
     kill_one "$name"
   fi
@@ -346,10 +369,10 @@ cmd_shell() {
   need_tmux
   local name abs cdir
   if [[ $# -gt 0 && "$1" != -* ]]; then
-    IFS=$'\t' read -r name abs < <(lookup "$1") || true
+    resolve "$1" name abs || exit 1
     shift
   else
-    IFS=$'\t' read -r name abs < <(lookup ".") || true
+    resolve "." name abs || exit 1
   fi
   [[ -n "$abs" ]] || die "unknown session: ${1:-}"
   cdir="$(container_path "$abs")"
