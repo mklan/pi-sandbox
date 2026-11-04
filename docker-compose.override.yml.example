@@ -1,0 +1,30 @@
+# Personal settings for one machine. Copy to docker-compose.override.yml
+# (git-ignored) and adjust — docker compose merges it into
+# docker-compose.yml automatically, so `./run.sh` and `docker compose ...`
+# see the merged result without extra flags.
+
+services:
+  pi:
+    environment:
+      # Session timezone.
+      TZ: UTC
+      # Default model for every session (leave empty or remove to let each
+      # session's caller decide).
+      PI_DEFAULT_PROVIDER: anthropic
+      PI_DEFAULT_MODEL: claude-sonnet-4-5
+      PI_DEFAULT_THINKING: high
+    volumes:
+      # The folders the agent may work in — one line per folder. Anything
+      # under /workspace/<name> in the container maps to the host folder
+      # on the left. Add as many as you like:
+      - /home/you/code:/workspace/code
+      - /home/you/notes:/workspace/notes
+      # git-over-ssh (read-only; ssh warns that it cannot update
+      # known_hosts — that is intentional):
+      # - /home/you/.ssh:/home/pi/.ssh:ro
+    # Resource limits — adjust to your machine.
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+          cpus: "4.0"

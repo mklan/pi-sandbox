@@ -1,0 +1,106 @@
+# Pi coding-agent sandbox image.
+#
+# Build from the repository root:  docker compose build  (or ./run.sh)
+#
+# pi runs as a non-root user whose uid/gid match the host user (build args
+# USER_UID/USER_GID, default 1000), so files written into the mounted
+# /workspace folders are owned by you instead of root.
+#
+# Self-extending image: inside a session the agent installs missing tools
+# with `pi-install <pkg>` — that installs into the running container and
+# records the package in the apt list below, so it is baked into the image
+# at the next build. The file is mounted into the running container at
+# /opt/pi-service/Dockerfile (see docker-compose.yml); `run.sh` compares
+# the PI_STAMP label against the image sources and rebuilds automatically
+# before starting a new session.
+
+FROM node:24-bookworm-slim
+
+# --- apt packages (one per line, keep alphabetical) ----------------------
+# pi-install appends packages on the fly here (directly above the cleanup
+# line), so everything the agent ever needed is part of the next build.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    bash \
+    ca-certificates \
+    curl \
+    fd-find \
+    file \
+    g++ \
+    git \
+    jq \
+    less \
+    make \
+    openssh-client \
+    procps \
+    python3 \
+    ripgrep \
+    sudo \
+    tmux \
+    unzip \
+    zip \
+    gh \
+  && rm -rf /var/lib/apt/lists/*
+
+# --- non-root user matching the host user --------------------------------
+# The node base image already ships a uid/gid 1000 "node" user — rename and
+# reuse it if it matches, create "pi" otherwise.
+ARG USER_UID=1000
+ARG USER_GID=1000
+RUN set -e; \
+  if getent group "${USER_GID}" >/dev/null; then \
+    groupmod -n pi "$(getent group "${USER_GID}" | cut -d: -f1)"; \
+  else \
+    groupadd --gid "${USER_GID}" pi; \
+  fi; \
+  if getent passwd "${USER_UID}" >/dev/null; then \
+    old="$(getent passwd "${USER_UID}" | cut -d: -f1)"; \
+    if [ "$old" != "pi" ]; then usermod -l pi "$old"; fi; \
+    usermod -g pi -d /home/pi -m -s /bin/bash pi; \
+  else \
+    useradd --uid "${USER_UID}" --gid "${USER_GID}" --create-home --shell /bin/bash pi; \
+  fi
+
+# --- preinstall pi -------------------------------------------------------
+ARG PI_VERSION=1.5.0
+RUN npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@${PI_VERSION}"
+
+# --- pi-install helper + the only root path for the pi user --------------
+# The helper validates package names, installs via apt, and records the
+# packages in this Dockerfile (see container/AGENTS.md). Keep it root-owned.
+COPY container/pi-install.sh /usr/local/bin/pi-install
+RUN chmod 0755 /usr/local/bin/pi-install \
+  && echo 'pi ALL=(root) NOPASSWD: /usr/local/bin/pi-install' > /etc/sudoers.d/pi-install \
+  && chmod 0440 /etc/sudoers.d/pi-install
+
+# --- entrypoint: default model from compose env (PI_DEFAULT_*) -----------
+COPY container/pi-entrypoint.sh /usr/local/bin/pi-entrypoint
+RUN chmod 0755 /usr/local/bin/pi-entrypoint
+
+# Pre-create the pi home dir so the named volume (see docker-compose.yml)
+# inherits pi:pi ownership instead of root.
+RUN mkdir -p /home/pi/.pi/agent \
+  && chown -R pi:pi /home/pi/.pi
+
+# --- GitHub CLI: persist the login across container recreations ---------
+# Everything outside /home/pi/.pi/agent is container-local, but gh stores
+# its credentials under ~/.config/gh. Symlink that into the pi-agent-home
+# volume so `gh auth login` survives `docker compose down`. The entrypoint
+# creates the target dir on a fresh volume.
+RUN mkdir -p /home/pi/.config \
+  && ln -sfn /home/pi/.pi/agent/gh /home/pi/.config/gh \
+  && chown -R pi:pi /home/pi/.config
+# Use gh as the git credential helper for all hosts (system-wide), so git
+# push/pull over HTTPS works with the gh login. `gh auth login` offers the
+# same setup per-user, but ~/.gitconfig itself is container-local.
+RUN git config --system credential.helper '!gh auth git-credential'
+
+# --- image stamp (run.sh rebuilds when this no longer matches) -----------
+ARG PI_STAMP=unstamped
+LABEL pi.service.stamp="${PI_STAMP}"
+
+USER pi
+ENV HOME=/home/pi
+WORKDIR /workspace
+
+ENTRYPOINT ["pi-entrypoint"]

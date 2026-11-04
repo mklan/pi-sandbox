@@ -1,0 +1,86 @@
+# pi — coding-agent sandbox.
+#
+# Hardening (details in README.md):
+#   - pi runs as a non-root user matching your uid/gid on the host
+#   - root only through pi-install (one narrow sudoers rule) for on-the-fly
+#     package installs; minimal capability set (subset of Docker's default)
+#   - only the folders you explicitly mount are reachable; the rest of the
+#     host is out of reach
+#   - the host's ~/.pi/agent is never mounted; the container keeps its own
+#     pi home (credentials, settings, sessions) in the pi-agent-home volume
+#
+# This file is meant to be universal and committable. Everything
+# machine-specific — which folders to mount, timezone, default model, API
+# keys, resource limits — goes into docker-compose.override.yml, which
+# docker compose merges into this file automatically. Copy
+# docker-compose.override.yml.example to get started (it is git-ignored,
+# so personal paths never end up in the repo).
+#
+# Usage: ./run.sh  (or see README.md)
+
+services:
+  pi:
+    build:
+      context: .
+      dockerfile: container/Dockerfile
+      args:
+        USER_UID: ${PUID:-1000}
+        USER_GID: ${PGID:-1000}
+    image: pi-sandbox
+    hostname: pi-sandbox
+    # Interactive service — start with `./run.sh` (= `docker compose run --rm pi`).
+    stdin_open: true
+    tty: true
+    environment:
+      # Default model for every session. Set these in
+      # docker-compose.override.yml (or the shell env, e.g.
+      # PI_DEFAULT_MODEL=other-model ./run.sh ...). Leave empty to let each
+      # session's caller decide — flags passed to pi win over these anyway.
+      PI_DEFAULT_PROVIDER: ${PI_DEFAULT_PROVIDER:-}
+      PI_DEFAULT_MODEL: ${PI_DEFAULT_MODEL:-}
+      PI_DEFAULT_THINKING: ${PI_DEFAULT_THINKING:-}
+    env_file:
+      # API keys and similar secrets (git-ignored, chmod 600) — see
+      # .env.secrets.example. Optional.
+      - path: .env.secrets
+        required: false
+    volumes:
+      # --- the folders the agent may work in -----------------------------
+      # Add one line per folder, in docker-compose.override.yml:
+      #
+      #   - /path/on/the/host:/workspace/<name>
+      #
+      # Everything under /workspace maps to those folders and is written
+      # with your uid/gid; nothing else on the host is reachable. run.sh
+      # accepts exactly the folders mounted here as session folders.
+      #
+      # Container-local pi home — keeps container credentials/settings/
+      # sessions out of the host ~/.pi/agent.
+      - pi-agent-home:/home/pi/.pi/agent
+      # Agent guide; pi loads <agent-dir>/AGENTS.md in every session.
+      - ./container/AGENTS.md:/home/pi/.pi/agent/AGENTS.md:ro
+      # The image's Dockerfile, so pi-install can record newly needed
+      # packages into the image sources (self-extending image, see README).
+      - ./container/Dockerfile:/opt/pi-service/Dockerfile
+      # Optional: ssh keys for git-over-ssh (read-only; ssh may warn that it
+      # cannot update known_hosts — that is intentional):
+      # - /home/you/.ssh:/home/pi/.ssh:ro
+    # Writable rootfs + setuid allowed so the agent can install missing
+    # packages on the fly via pi-install (the only command the pi user may
+    # run as root). The capability set is a minimal subset of Docker's
+    # default — just enough for sudo and apt/dpkg.
+    cap_drop:
+      - ALL
+    cap_add:
+      - AUDIT_WRITE
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - FSETID
+      - MKNOD
+      - SETGID
+      - SETUID
+      - SYS_CHROOT
+
+volumes:
+  pi-agent-home:
