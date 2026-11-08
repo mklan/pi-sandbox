@@ -16,6 +16,8 @@ $EDITOR docker-compose.override.yml                                 # mount your
 ## Usage — one session per folder
 
 ```bash
+./run.sh                                  # resume the last opened session (any folder)
+./run.sh .                                # current folder: its session, or a new one
 ./run.sh ~/code/my-project                # open pi in that folder (creates/attaches a session)
 ./run.sh ~/code/some-other-project        # parallel session in another folder
 ./run.sh ~/code/my-project -p "fix X"     # pass extra flags to pi
@@ -42,6 +44,10 @@ Paths can be host paths or container paths (`/workspace/...`) and must lie
 inside one of the mounted folders; a bare folder name works too when it is
 unambiguous (`./run.sh my-project` — a folder directly under one of the
 mounts, or the name of an existing session).
+
+With no path at all, `./run.sh` resumes the most recently opened session
+regardless of the current folder (or starts one in the current folder when
+nothing is running). Pass `.` to explicitly mean the current folder.
 
 All sessions share the same container-local pi home volume (settings,
 sessions), so provider keys from `.env.secrets` and login state are shared

@@ -3,6 +3,8 @@
 # named sessions you can detach from and re-attach to, so several folders
 # can work in parallel.
 #
+#   ./run.sh [-b]                       resume the last opened session
+#   ./run.sh [-b] .                     open pi for the current folder
 #   ./run.sh [-b] [path] [pi-args...]   open (or re-attach to) pi for a folder
 #   ./run.sh ls [-w]                    list sessions (-w: live view)
 #   ./run.sh log <path|name>            show a session's current screen
@@ -21,6 +23,10 @@
 # becomes a valid session folder. A bare folder name works too when it is
 # unambiguous (any folder under one of the mounts is found by name, or an
 # existing session name). -b/--background starts the session without attaching.
+#
+# With no path at all, run.sh resumes the most recently opened session
+# regardless of the current folder (or starts one in the current folder when
+# nothing is running). Pass "." to explicitly mean the current folder.
 set -euo pipefail
 
 SERVICE_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
@@ -34,9 +40,11 @@ usage() {
 
 need_tmux() { command -v tmux >/dev/null 2>&1 || die "tmux is required"; }
 
+# session names must be safe as tmux targets: tmux splits -t values on "."
+# and ":" (window/pane separators), so those become "-" here
 slugify() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]' \
-    | sed 's/[^a-z0-9._-]/-/g; s/--*/-/g; s/^-//; s/-$//'
+    | sed 's/[^a-z0-9_-]/-/g; s/--*/-/g; s/^-//; s/-$//'
 }
 
 hash4() { printf '%s' "$1" | cksum | awk '{ printf "%04x", $1 % 65536 }'; }
@@ -171,12 +179,52 @@ container_path() {
   printf '%s%s' "$mc" "${1#"$mh"}"
 }
 
+# --- tmux session lookup (exact) ----------------------------------------
+# Never look a session up by name via `tmux has-session -t` /
+# `show-options -t`: tmux parses "." and ":" in -t values as window/pane
+# separators and falls back to fuzzy matching, so a target like "pi-."
+# happily resolves to some other pi-* session (e.g. the last opened one).
+# Compare names exactly against a listing instead.
+
+session_exists() {
+  tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -Fxq -- "$1"
+}
+
+# read a session option (e.g. @pi-path) by exact session name — matched
+# in the listing, not via a tmux target; no field separators either, since
+# tmux mangles control characters in -F format strings (tab becomes "_")
+session_opt() {
+  local n
+  while IFS= read -r n; do
+    [[ "$n" == "$1" ]] || continue
+    # (no "=" prefix: it makes show-options treat the target as a pane)
+    tmux show-options -qv -t "$n" "$2" 2>/dev/null
+    return 0
+  done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null)
+}
+
+# the most recently opened pi session (created or re-attached), if any —
+# what a bare "run.sh" resumes
+last_session() {
+  local created activity name best=0 bestn=""
+  # numbers first, name last: the name may contain spaces
+  while read -r created activity name; do
+    [[ "$name" == pi-* && "$created" =~ ^[0-9]+$ && "$activity" =~ ^[0-9]+$ ]] \
+      || continue
+    if (( created > best || activity > best )); then
+      best=$(( created > activity ? created : activity ))
+      bestn="$name"
+    fi
+  done < <(tmux list-sessions -F '#{session_created} #{session_activity} #{session_name}' 2>/dev/null)
+  printf '%s' "$bestn"
+}
+
 session_name() {
   local abs="$1" slug cand stored
   slug="$(slugify "$(basename "$abs")")"
   cand="pi-${slug:-root}"
-  if tmux has-session -t "=$cand" 2>/dev/null; then
-    stored="$(tmux show-options -qv -t "$cand" @pi-path 2>/dev/null || true)"
+  if session_exists "$cand"; then
+    stored="$(session_opt "$cand" @pi-path)"
     if [[ -n "$stored" && "$stored" != "$abs" ]]; then
       cand="pi-$slug-$(hash4 "$abs")"
     fi
@@ -187,16 +235,16 @@ session_name() {
 # resolve "<path|name>" to "name<tab>host-abs-path"
 lookup() {
   local arg="${1:-.}" name abs
-  if [[ "$arg" == pi-* ]] && tmux has-session -t "=$arg" 2>/dev/null; then
+  if [[ "$arg" == pi-* ]] && session_exists "$arg"; then
     name="$arg"
-  elif tmux has-session -t "=pi-$arg" 2>/dev/null; then
+  elif session_exists "pi-$arg"; then
     name="pi-$arg"
   else
     abs="$(host_path "$arg")" || return 1
     printf '%s\t%s\n' "$(session_name "$abs")" "$abs"
     return
   fi
-  abs="$(tmux show-options -qv -t "$name" @pi-path 2>/dev/null || true)"
+  abs="$(session_opt "$name" @pi-path)"
   printf '%s\t%s\n' "$name" "$abs"
 }
 
@@ -253,7 +301,7 @@ create() {
 
 cmd_open() {
   need_tmux
-  local bg=0 path
+  local bg=0 path resume=0
   while [[ "${1:-}" == -b || "${1:-}" == --background ]]; do
     bg=1
     shift
@@ -261,13 +309,30 @@ cmd_open() {
   if [[ $# -gt 0 && "$1" != -* ]]; then
     path="$1"
     shift
-  else
+  elif [[ $# -gt 0 ]]; then
+    # pi args without a folder only make sense for the current folder
     path="."
+  else
+    # no arguments at all: resume the last opened session; "." explicitly
+    # means the current folder instead
+    path="."
+    resume=1
   fi
-  local abs name
+  local abs name last
+  if [[ $resume -eq 1 ]] && last="$(last_session)" && [[ -n "$last" ]]; then
+    name="$last"
+    abs="$(session_opt "$name" @pi-path)"
+    [[ $# -gt 0 ]] && echo "note: resuming $name, pi args ignored" >&2
+    if [[ $bg -eq 1 ]]; then
+      echo "resuming $name (${abs:-?}) — already running, not attaching"
+    else
+      attach "$name"
+    fi
+    return
+  fi
   resolve "$path" name abs || exit 1
   [[ -n "$abs" ]] || die "no folder recorded for $path"
-  if tmux has-session -t "=$name" 2>/dev/null; then
+  if session_exists "$name"; then
     [[ $# -gt 0 ]] && echo "note: session exists, pi args ignored" >&2
   else
     create "$name" "$abs" "$@"
@@ -310,12 +375,15 @@ last_output() {
 ls_table() {
   local s created abs attached state
   printf '%-18s %-28s %-9s %-6s %s\n' SESSION FOLDER STATE AGE LAST
-  while IFS=$'\t' read -r s created abs attached; do
-    if [[ "${attached:-0}" -gt 0 ]]; then state="attached"; else state="detached"; fi
+  while read -r created attached s; do
+    [[ "$s" == pi-* ]] || continue
+    [[ "$created" =~ ^[0-9]+$ ]] || created=0
+    [[ "$attached" =~ ^[0-9]+$ ]] || attached=0
+    if [[ "$attached" -gt 0 ]]; then state="attached"; else state="detached"; fi
+    abs="$(session_opt "$s" @pi-path)"
     printf '%-18s %-28s %-9s %-6s %s\n' "$s" "$(short_path "${abs:-?}")" \
       "$state" "$(age_str "$created")" "$(last_output "$s")"
-  done < <(tmux list-sessions -F $'#{session_name}\t#{session_created}\t#{@pi-path}\t#{session_attached}' 2>/dev/null \
-    | grep '^pi-' || true)
+  done < <(tmux list-sessions -F '#{session_created} #{session_attached} #{session_name}' 2>/dev/null)
 }
 
 cmd_ls() {
@@ -338,13 +406,13 @@ cmd_log() {
   need_tmux
   local name abs
   resolve "${1:-.}" name abs || exit 1
-  tmux has-session -t "=$name" 2>/dev/null || die "no session for ${1:-$PWD}"
+  session_exists "$name" || die "no session for ${1:-$PWD}"
   tmux capture-pane -p -t "$name" -S -300
 }
 
 kill_one() {
   local name="$1" cname
-  cname="$(tmux show-options -qv -t "$name" @pi-cname 2>/dev/null || true)"
+  cname="$(session_opt "$name" @pi-cname)"
   tmux kill-session -t "$name" 2>/dev/null || true
   docker rm -f "${cname:-$name}" >/dev/null 2>&1 || true
   echo "stopped $name"
@@ -360,7 +428,7 @@ cmd_kill() {
   else
     local name abs
     resolve "${1:-.}" name abs || exit 1
-    tmux has-session -t "=$name" 2>/dev/null || die "no session for ${1:-$PWD}"
+    session_exists "$name" || die "no session for ${1:-$PWD}"
     kill_one "$name"
   fi
 }
