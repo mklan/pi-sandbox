@@ -118,6 +118,25 @@ over HTTPS work automatically once `gh auth status` shows a login — no
 separate git credentials or SSH keys needed. Creating repos works too:
 `gh repo create ...`.
 
+## Committing and pushing (scope)
+
+When the user says "commit", "push", or "commit and push" (or asks to
+stage, commit, or publish changes) without naming a repo, scope is **only
+the current workspace**: the repo that contains the current working
+directory (e.g. `services/pi` is its own repo — stage, commit, and push
+there only). This also applies to bare "commit this" / "push it"
+requests: they always mean the current workspace, never more.
+
+- Never commit or push parent repos (e.g. `/workspace/stack`) or sibling
+  folders as part of such a request — even if the parent shows the
+  workspace as a modified submodule. Mention it instead if the parent
+  looks dirty, and let the user decide.
+- If the request names a different path or repo explicitly, that target
+  wins over the current-workspace default.
+- Committing never pushes unless the user said "push" (or "commit and
+  push"). Pushing never switches branches — push the current branch
+  (ask first if it has no upstream or the remote has diverged).
+
 ## Rules of the house
 
 - Prefer the preinstalled tools; install only what is genuinely missing.
