@@ -6,6 +6,40 @@ mounted under `/workspace/<name>` — run `ls /workspace` to see which ones
 this session has. Everything you write there lands on the host, owned by
 the user; treat the rest of the container as disposable.
 
+## How this container runs: herdr
+
+This container's main process is **herdr** (`herdr server`), a terminal
+runtime for coding agents (herdr.dev). Every shell, agent and long-running
+command here lives in a herdr pane and keeps running across SSH
+disconnects, TUI clients attaching/detaching, and even container
+recreations (herdr restores the workspace layout and resumes pi sessions
+from its state in `/home/pi/.pi/agent/herdr`). The user attaches with the
+herdr TUI from the host (`./run.sh` on the host side) — there is no tmux
+involved anywhere.
+
+If `test "${HERDR_ENV:-}" = 1` succeeds, **you are running inside a herdr
+pane** and can steer the session around you. The full control manual is
+embedded in the binary:
+
+    herdr --skill          # how to control panes, workspaces and agents
+    herdr --help           # every command
+
+Typical use: split a pane to run tests or a dev server next to you
+(`herdr pane split --current --direction right --cwd "$PWD" --no-focus`),
+start helper agents (`herdr agent start <name> --kind codex --pane <id>`),
+read their output (`herdr agent read <name>`), and wait for them
+(`herdr agent wait <name>`). Use `--no-focus` for background work so you
+do not steal the user's view.
+
+The pi integration (installed by the entrypoint, `herdr integration
+status`) reports your working/blocked/done status to herdr's sidebar and
+enables session restore — leave it in place.
+
+**Never** run `herdr server stop` and never kill the `herdr server`
+process — it is PID 1 and the keeper of every terminal here; the container
+dies with it. Do not close workspaces, tabs or panes you did not create
+unless the user asks.
+
 ## Missing packages and tools
 
 The image ships common tooling: git, gh (GitHub CLI), ripgrep (rg), fd,
@@ -37,6 +71,37 @@ image before starting the next session. You cannot rebuild it yourself —
 just record the package and tell the user it takes effect for new sessions
 (running sessions keep their current image).
 
+## Pi extensions (packages)
+
+Base extensions (e.g. subagents) are declared in
+`container/pi-extensions.txt` in the service repo — one `pi install`
+source per line, e.g. `npm:pi-subagents` (pin versions like
+`npm:pkg@x.y.z` for reproducible builds). If the service repo is mounted
+under `/workspace`, edit that file directly; otherwise tell the user
+which line to add.
+
+When you need an extension:
+
+1. Add its source line to `container/pi-extensions.txt` (keep the list
+   alphabetical). This is the single source of truth: the image
+   build installs it, and the container entrypoint installs whatever is
+   declared but missing on every start.
+2. Install it right now too, so you can use it immediately:
+
+       pi install <source>
+
+   This only lands in the container's settings volume — step 1 is what
+   makes it survive fresh volumes and rebuilds.
+3. Make sure it got recorded: the file is bind-mounted at
+   `/opt/pi-service/pi-extensions.txt` (read-only). If that mount is
+   missing, add the line on the host yourself and tell the user where.
+
+You cannot rebuild the image yourself — the host rebuilds automatically
+when the list changes (it is part of the image stamp). The entrypoint
+picks up added lines on the next container start; tell the user a
+restart applies them (`docker compose restart`) if the sandbox is
+already running.
+
 ## GitHub CLI (`gh`) and git push/pull
 
 `gh` is preinstalled. Its credentials live in `~/.config/gh`, which is a
@@ -57,10 +122,11 @@ separate git credentials or SSH keys needed. Creating repos works too:
 
 - Prefer the preinstalled tools; install only what is genuinely missing.
 - Keep the Dockerfile package list alphabetical, one package per line.
-- pi's own version is pinned in the Dockerfile (`ARG PI_VERSION`). Do not
-  run `pi update` — it would only change this throwaway container. If a
-  pi version change is needed, tell the user to run `./run.sh upgrade` on
-  the host.
+- pi's own version is pinned in the Dockerfile (`ARG PI_VERSION`), and so
+  is herdr (`ARG HERDR_VERSION`). Do not run `pi update` or `herdr update`
+  — it would only change this throwaway container. If a version change is
+  needed, tell the user to run `./run.sh upgrade` or `./run.sh
+  upgrade-herdr` on the host.
 - `pi-install` accepts plain Debian package names only (no flags, no
   paths) — do not try to work around that or to escalate privileges in any
   other way (no editing sudoers, no setuid tricks).

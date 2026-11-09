@@ -4,54 +4,73 @@ Runs [pi](https://github.com/earendil-works/pi) inside a hardened Docker
 container so a misbehaving (or prompt-injected) model can only touch the
 folders you mount into it, not the rest of your system.
 
+The container itself is a long-running [herdr](https://herdr.dev) runtime:
+one terminal workspace per folder, every pane and agent kept alive until
+you close it — no tmux, no per-session containers. `./run.sh` is the
+shortcut that drops you into the herdr TUI, right at the folder you are
+in.
+
 ## Quick start
 
 ```bash
 cp docker-compose.override.yml.example docker-compose.override.yml  # your mounts & defaults
 cp .env.secrets.example .env.secrets && chmod 600 .env.secrets       # provider API keys
 $EDITOR docker-compose.override.yml                                 # mount your folders
-./run.sh ~/code/my-project                                          # open pi in that folder
+./run.sh ~/code/my-project                                          # open that folder in herdr
 ```
 
-## Usage — one session per folder
+## Usage — one herdr, one workspace per folder
 
 ```bash
-./run.sh                                  # resume the last opened session (any folder)
-./run.sh .                                # current folder: its session, or a new one
-./run.sh ~/code/my-project                # open pi in that folder (creates/attaches a session)
-./run.sh ~/code/some-other-project        # parallel session in another folder
-./run.sh ~/code/my-project -p "fix X"     # pass extra flags to pi
-./run.sh -b ~/code/my-project             # start in the background without attaching
+./run.sh                                  # open herdr for the current folder
+./run.sh .                                # same, explicitly
+./run.sh ~/code/my-project                # open that folder's workspace (creates it on first visit)
+./run.sh ~/code/some-other-project        # jump to another folder's workspace
+./run.sh ~/code/my-project -p "fix X"     # first open: pass extra flags to pi
+./run.sh -b ~/code/my-project             # open the workspace without attaching the TUI
 
-./run.sh ls [-w]                          # list sessions (-w: live view, ctrl+c to stop)
-./run.sh log ~/code/my-project            # peek at a session's current screen
-./run.sh shell ~/code/my-project          # bash in that session's container
-./run.sh kill ~/code/my-project           # stop a session (or: kill --all)
+./run.sh ls [-w]                          # list workspaces and agents (-w: live view)
+./run.sh log ~/code/my-project            # peek at a workspace's current screen
+./run.sh shell ~/code/my-project          # bash in the sandbox at that folder
+./run.sh kill ~/code/my-project           # close a workspace (or: kill --all)
+./run.sh down                             # stop the sandbox entirely
 ./run.sh upgrade                          # pin the latest pi release and rebuild
+./run.sh upgrade-herdr                    # pin the latest herdr release and rebuild
 docker compose build                      # rebuild after changing the Dockerfile
 ```
 
-`ls` shows each session's folder, state (attached/detached), age, and the
-last meaningful line pi is currently showing — handy to check on detached
-background runs.
+The sandbox container runs [herdr](https://herdr.dev) as its main
+process: a terminal workspace manager for coding agents. One **workspace**
+per folder, each holding real terminal **panes** — pi agents, shells, dev
+servers, tests — that herdr keeps alive until you close them. `run.sh` is
+only a convenience layer: it starts the container if needed, opens (or
+creates) the workspace for a folder, focuses it and attaches the herdr
+TUI.
 
-Each folder gets its own tmux session (`pi-<folder>`) running its own
-sandboxed container. **Detach with your tmux prefix + d** (default
-`Ctrl-b d`) — pi keeps working in the background; re-attach any time by
-running `./run.sh <path>` again. Sessions disappear when pi exits.
+**No tmux anywhere.** Detach with herdr's `ctrl+b q` — everything keeps
+running (your SSH connection can die, too). Re-attach by running
+`./run.sh` again. Inside the TUI: `ctrl+b ?` shows all keys, `ctrl+b w`
+navigates workspaces, and the mouse works everywhere (click panes and
+sidebar entries, right-click for menus). The sidebar shows whether each
+agent is working, done, or waiting for you.
+
+First open of a folder starts pi in its workspace (with the `PI_DEFAULT_*`
+model defaults, see below). Later opens just focus the workspace —
+whatever is running there keeps running. Closing a workspace (`kill`) is
+the only way its terminals go away; `down` stops the whole sandbox (the
+workspace layout and pi sessions come back on the next start, herdr
+restores them).
 
 Paths can be host paths or container paths (`/workspace/...`) and must lie
 inside one of the mounted folders; a bare folder name works too when it is
 unambiguous (`./run.sh my-project` — a folder directly under one of the
-mounts, or the name of an existing session).
+mounts), and so do workspace names (`./run.sh stack/services/pi`) and ids
+(`./run.sh w3`). With no path at all, `./run.sh` opens the current folder;
+from outside the mounts it just attaches wherever you left off.
 
-With no path at all, `./run.sh` resumes the most recently opened session
-regardless of the current folder (or starts one in the current folder when
-nothing is running). Pass `.` to explicitly mean the current folder.
-
-All sessions share the same container-local pi home volume (settings,
+All workspaces share the same container-local pi home volume (settings,
 sessions), so provider keys from `.env.secrets` and login state are shared
-across sessions.
+across them.
 
 ## Folders the agent may work in
 
@@ -67,7 +86,7 @@ volumes:
 Mount as many folders as you like, in `docker-compose.yml` (shared) or
 `docker-compose.override.yml` (personal, git-ignored). `run.sh` reads
 exactly these mounts from the merged compose config, so a folder becomes a
-valid session folder as soon as it is mounted. Inside the container the
+valid workspace folder as soon as it is mounted. Inside the container the
 mapping is `/workspace/<name>` ↔ the host folder; files are written with
 your uid/gid.
 
@@ -75,11 +94,11 @@ your uid/gid.
 
 | Path | Purpose |
 |---|---|
-| `run.sh` | host-side session manager (tmux + docker compose) |
+| `run.sh` | host-side convenience layer (docker compose + herdr via `docker exec`) |
 | `docker-compose.yml` | the sandbox definition — universal, meant to be committed |
 | `docker-compose.override.yml` | personal mounts/defaults for one machine (git-ignored; see the `.example`) |
 | `.env.secrets` | provider API keys (git-ignored, chmod 600; see the `.example`) |
-| `container/` | everything that makes up the image: `Dockerfile`, `pi-entrypoint.sh`, `pi-install.sh`, `AGENTS.md` — these run *inside* the container and are no host tools |
+| `container/` | everything that makes up the image: `Dockerfile`, `pi-entrypoint.sh`, `pi-install.sh`, `install-herdr.sh`, `pi-extensions.txt`, `pi-extensions-sync.sh`, `AGENTS.md` — these run *inside* the container and are no host tools |
 | `README.md` | this file |
 
 ## Hardening
@@ -110,10 +129,9 @@ folders — commit/push before long unsupervised runs so you can recover.
 
 ## Default model
 
-Every session can start with a default provider/model/thinking level,
-applied by the `pi-entrypoint` wrapper. Set the defaults in
-`docker-compose.override.yml` (or leave them empty so each session's
-caller decides):
+Every new workspace can start pi with a default provider/model/thinking
+level. Set the defaults in `docker-compose.override.yml` (or leave them
+empty so each caller decides):
 
 ```bash
 PI_DEFAULT_MODEL=other-model ./run.sh ~/code/my-project   # one-off override
@@ -122,12 +140,14 @@ PI_DEFAULT_MODEL=other-model ./run.sh ~/code/my-project   # one-off override
 | Variable | Meaning |
 |---|---|
 | `PI_DEFAULT_PROVIDER` | provider for the default model |
-| `PI_DEFAULT_MODEL` | model every session starts with |
+| `PI_DEFAULT_MODEL` | model pi starts with |
 | `PI_DEFAULT_THINKING` | default thinking level |
 
-Flags you pass yourself win: `./run.sh ~/code/my-project --model some-model`
-skips the defaults entirely (including the default provider, since your
-model may belong to another one).
+The defaults are applied by `run.sh` when it starts pi in a new workspace,
+and by the `pi-entrypoint` wrapper for direct `pi ...` runs. Flags you
+pass yourself win: `./run.sh ~/code/my-project --model some-model` skips
+the defaults entirely (including the default provider, since your model
+may belong to another one).
 
 ## Credentials & git-over-ssh
 
@@ -156,25 +176,46 @@ Dockerfile is mounted at `/opt/pi-service/Dockerfile` for this), keeping
 the Dockerfile the single source of truth.
 
 `run.sh` hashes `container/Dockerfile` + `container/pi-install.sh` +
-`container/pi-entrypoint.sh` into the image label `pi.service.stamp`; when
-they no longer match (e.g. after `pi-install` recorded something), it
-rebuilds `pi-sandbox` automatically before starting the next session.
-Running sessions keep their current image.
+`container/pi-entrypoint.sh` + `container/install-herdr.sh` +
+`container/pi-extensions.txt` + `container/pi-extensions-sync.sh` into
+the image label `pi.service.stamp`; when they no longer match (e.g. after
+`pi-install` recorded something), it rebuilds `pi-sandbox` automatically
+before starting the sandbox again. Running sessions keep their current
+image.
 
 Manual changes work the same way: edit the image sources in `container/`,
 and the next `./run.sh` rebuilds. Force it with `docker compose build`.
 
-## Upgrading pi
+## Pi extensions
 
-pi itself is pinned via `ARG PI_VERSION` in `container/Dockerfile` —
-persistent, like everything else in the image:
+Base pi extensions (packages, e.g. subagents) are declared in
+`container/pi-extensions.txt` — one `pi install` source per line:
 
-```bash
-./run.sh upgrade          # pin the latest npm release and rebuild
-./run.sh upgrade 1.6.0    # pin a specific version and rebuild
+```text
+npm:pi-subagents
+npm:my-tools@1.2.0   # pin a version for reproducible builds
 ```
 
-The rebuild is immediate and all future builds keep the pinned version.
-Running sessions keep their old pi until restarted. Note that `pi update`
-*inside* a session is not persistent — it only changes that throwaway
-container.
+The build installs every line into the image (fresh volumes start with
+them); the container entrypoint re-checks the file on every start and
+installs whatever is declared but missing, so adding a line takes effect
+on the next container start (`docker compose restart` applies it now)
+even before the automatic rebuild bakes it in. Inside a session,
+`pi install <source>` still works for the moment, but only a line in
+`pi-extensions.txt` survives fresh volumes and rebuilds.
+
+## Upgrading pi and herdr
+
+Both tools are pinned in `container/Dockerfile` (`ARG PI_VERSION`,
+`ARG HERDR_VERSION`) — persistent, like everything else in the image:
+
+```bash
+./run.sh upgrade          # pin the latest npm pi release and rebuild
+./run.sh upgrade 1.6.0    # pin a specific pi version and rebuild
+./run.sh upgrade-herdr    # pin the latest herdr release and rebuild
+```
+
+The rebuild is immediate and all future builds keep the pinned versions.
+Running workspaces keep their old binaries until restarted. Note that
+`pi update` / `herdr update` *inside* a running container are not
+persistent — they only change that container.

@@ -1,0 +1,28 @@
+# Pi extensions (packages) baked into the sandbox image.
+#
+# One `pi install` source per line — the same strings you would pass to
+# `pi install` inside a session. Lines starting with `#` and blank lines
+# are ignored. Keep the list alphabetical.
+#
+#   npm:pi-subagents          install the latest release from npm
+#   npm:pi-subagents@0.87.0   pin an exact version (reproducible builds)
+#   git:github.com/user/repo@v1   install from git
+#   ./relative/path           project-local path (resolved from the
+#                             settings file that declares it — prefer
+#                             npm:/git: sources here)
+#
+# How it works:
+#   - `docker compose build` installs every line into the image, so fresh
+#     volumes (and the npm cache) start with the extensions present.
+#   - the container entrypoint re-checks this file on every start and
+#     installs whatever is declared but missing, so adding a line takes
+#     effect on the next container start even before a rebuild.
+#   - `run.sh` hashes this file into the image stamp and rebuilds
+#     automatically when it changes.
+#
+# Inside a session, prefer declaring the extension here over a bare
+# `pi install`: a bare install only lands in the container's settings
+# volume, while a line here survives fresh volumes and rebuilds.
+# See container/AGENTS.md ("Pi extensions").
+
+npm:pi-subagents

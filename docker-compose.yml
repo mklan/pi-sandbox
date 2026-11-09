@@ -28,14 +28,17 @@ services:
         USER_GID: ${PGID:-1000}
     image: pi-sandbox
     hostname: pi-sandbox
-    # Interactive service — start with `./run.sh` (= `docker compose run --rm pi`).
-    stdin_open: true
-    tty: true
+    # Long-running sandbox: the container's main process is `herdr server`
+    # (see container/AGENTS.md) — a terminal runtime that keeps every pane,
+    # agent and command alive until the container stops. Start it with
+    # `./run.sh`, which attaches the herdr TUI via `docker exec`.
+    restart: unless-stopped
     environment:
-      # Default model for every session. Set these in
+      # Default model for pi when run.sh opens a new workspace (or when
+      # pi is started through pi-entrypoint). Set these in
       # docker-compose.override.yml (or the shell env, e.g.
       # PI_DEFAULT_MODEL=other-model ./run.sh ...). Leave empty to let each
-      # session's caller decide — flags passed to pi win over these anyway.
+      # caller decide — flags passed to pi win over these anyway.
       PI_DEFAULT_PROVIDER: ${PI_DEFAULT_PROVIDER:-}
       PI_DEFAULT_MODEL: ${PI_DEFAULT_MODEL:-}
       PI_DEFAULT_THINKING: ${PI_DEFAULT_THINKING:-}
@@ -52,16 +55,23 @@ services:
       #
       # Everything under /workspace maps to those folders and is written
       # with your uid/gid; nothing else on the host is reachable. run.sh
-      # accepts exactly the folders mounted here as session folders.
+      # accepts exactly the folders mounted here as workspace folders.
       #
       # Container-local pi home — keeps container credentials/settings/
-      # sessions out of the host ~/.pi/agent.
+      # sessions out of the host ~/.pi/agent. herdr's state (workspace
+      # layout, session snapshots) and gh's login live in there too (via
+      # symlinks, see container/Dockerfile), so they survive container
+      # recreations.
       - pi-agent-home:/home/pi/.pi/agent
       # Agent guide; pi loads <agent-dir>/AGENTS.md in every session.
       - ./container/AGENTS.md:/home/pi/.pi/agent/AGENTS.md:ro
       # The image's Dockerfile, so pi-install can record newly needed
       # packages into the image sources (self-extending image, see README).
       - ./container/Dockerfile:/opt/pi-service/Dockerfile
+      # Declared pi extensions (see container/pi-extensions.txt): mounted
+      # read-only so the entrypoint picks up host edits on the next
+      # container start even before a rebuild bakes them in.
+      - ./container/pi-extensions.txt:/opt/pi-service/pi-extensions.txt:ro
       # Optional: ssh keys for git-over-ssh (read-only; ssh may warn that it
       # cannot update known_hosts — that is intentional):
       # - /home/you/.ssh:/home/pi/.ssh:ro

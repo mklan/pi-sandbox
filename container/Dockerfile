@@ -65,6 +65,32 @@ RUN set -e; \
 ARG PI_VERSION=1.5.0
 RUN npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@${PI_VERSION}"
 
+# --- preinstall herdr (terminal runtime for coding agents) ----------------
+# herdr runs every terminal in this container (see container/AGENTS.md) and
+# keeps them alive across SSH disconnects and client restarts. Pinned like
+# pi: `herdr update` inside a session only changes the running container.
+# Installed pi-owned so that update can replace it at runtime.
+ARG HERDR_VERSION=0.9.5
+COPY container/install-herdr.sh /usr/local/bin/install-herdr
+RUN chmod 0755 /usr/local/bin/install-herdr \
+  && install-herdr "${HERDR_VERSION}" /home/pi/.local/bin \
+  && chown -R pi:pi /home/pi/.local
+ENV PATH="/home/pi/.local/bin:${PATH}"
+
+# --- preinstalled pi extensions (packages) --------------------------------
+# Declared in container/pi-extensions.txt (one `pi install` source per
+# line); installed here so fresh volumes start with them and the npm cache
+# is warm. The entrypoint re-syncs the same list at container boot, so
+# lines added later are picked up on the next start. Pin versions in the
+# list (npm:pkg@x.y.z) for reproducible builds.
+COPY container/pi-extensions.txt /opt/pi-service/pi-extensions.txt
+COPY container/pi-extensions-sync.sh /usr/local/bin/pi-extensions-sync
+RUN chmod 0755 /usr/local/bin/pi-extensions-sync \
+  && chmod 644 /opt/pi-service/pi-extensions.txt
+USER pi
+RUN /usr/local/bin/pi-extensions-sync
+USER root
+
 # --- pi-install helper + the only root path for the pi user --------------
 # The helper validates package names, installs via apt, and records the
 # packages in this Dockerfile (see container/AGENTS.md). Keep it root-owned.
@@ -73,7 +99,7 @@ RUN chmod 0755 /usr/local/bin/pi-install \
   && echo 'pi ALL=(root) NOPASSWD: /usr/local/bin/pi-install' > /etc/sudoers.d/pi-install \
   && chmod 0440 /etc/sudoers.d/pi-install
 
-# --- entrypoint: default model from compose env (PI_DEFAULT_*) -----------
+# --- entrypoint: herdr server + default model from compose env -----------
 COPY container/pi-entrypoint.sh /usr/local/bin/pi-entrypoint
 RUN chmod 0755 /usr/local/bin/pi-entrypoint
 
@@ -87,8 +113,12 @@ RUN mkdir -p /home/pi/.pi/agent \
 # its credentials under ~/.config/gh. Symlink that into the pi-agent-home
 # volume so `gh auth login` survives `docker compose down`. The entrypoint
 # creates the target dir on a fresh volume.
+# Same for herdr: its state (~/.config/herdr — config, workspace layout,
+# session snapshots, logs) lives in the volume, so workspaces and agents
+# come back after the container is recreated.
 RUN mkdir -p /home/pi/.config \
   && ln -sfn /home/pi/.pi/agent/gh /home/pi/.config/gh \
+  && ln -sfn /home/pi/.pi/agent/herdr /home/pi/.config/herdr \
   && chown -R pi:pi /home/pi/.config
 # Use gh as the git credential helper for all hosts (system-wide), so git
 # push/pull over HTTPS works with the gh login. `gh auth login` offers the
