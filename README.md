@@ -98,7 +98,7 @@ your uid/gid.
 | `docker-compose.yml` | the sandbox definition — universal, meant to be committed |
 | `docker-compose.override.yml` | personal mounts/defaults for one machine (git-ignored; see the `.example`) |
 | `.env.secrets` | provider API keys (git-ignored, chmod 600; see the `.example`) |
-| `container/` | everything that makes up the image: `Dockerfile`, `pi-entrypoint.sh`, `pi-install.sh`, `install-herdr.sh`, `pi-extensions.txt`, `pi-extensions-sync.sh`, `AGENTS.md` — these run *inside* the container and are no host tools |
+| `container/` | everything that makes up the image: `Dockerfile`, `pi-entrypoint.sh`, `pi-wrapper.sh`, `pi-install.sh`, `install-herdr.sh`, `pi-extensions.txt`, `pi-extensions-sync.sh`, `AGENTS.md` — these run *inside* the container and are no host tools |
 | `README.md` | this file |
 
 ## Hardening
@@ -129,9 +129,9 @@ folders — commit/push before long unsupervised runs so you can recover.
 
 ## Default model
 
-Every new workspace can start pi with a default provider/model/thinking
-level. Set the defaults in `docker-compose.override.yml` (or leave them
-empty so each caller decides):
+Every pi session can start with a default provider/model/thinking level.
+Set the defaults in `docker-compose.override.yml` (or leave them empty so
+each caller decides):
 
 ```bash
 PI_DEFAULT_MODEL=other-model ./run.sh ~/code/my-project   # one-off override
@@ -143,11 +143,14 @@ PI_DEFAULT_MODEL=other-model ./run.sh ~/code/my-project   # one-off override
 | `PI_DEFAULT_MODEL` | model pi starts with |
 | `PI_DEFAULT_THINKING` | default thinking level |
 
-The defaults are applied by `run.sh` when it starts pi in a new workspace,
-and by the `pi-entrypoint` wrapper for direct `pi ...` runs. Flags you
-pass yourself win: `./run.sh ~/code/my-project --model some-model` skips
-the defaults entirely (including the default provider, since your model
-may belong to another one).
+The defaults apply everywhere: `run.sh` passes them when it starts pi in a
+new workspace, and a `pi` wrapper (`container/pi-wrapper.sh`, installed as
+`/home/pi/.local/bin/pi`, first in `PATH`) injects them for a bare `pi`
+typed in any herdr pane — so `ctrl+c` out of pi and restarting it by hand
+keeps the same model. Flags you pass yourself win: `pi --model some-model`
+skips the defaults entirely (including the default provider, since your
+model may belong to another one). Management subcommands (`install`,
+`list`, `auth`, ...) never get model flags injected.
 
 ## Credentials & git-over-ssh
 
@@ -176,8 +179,9 @@ Dockerfile is mounted at `/opt/pi-service/Dockerfile` for this), keeping
 the Dockerfile the single source of truth.
 
 `run.sh` hashes `container/Dockerfile` + `container/pi-install.sh` +
-`container/pi-entrypoint.sh` + `container/install-herdr.sh` +
-`container/pi-extensions.txt` + `container/pi-extensions-sync.sh` into
+`container/pi-entrypoint.sh` + `container/pi-wrapper.sh` +
+`container/install-herdr.sh` + `container/pi-extensions.txt` +
+`container/pi-extensions-sync.sh` into
 the image label `pi.service.stamp`; when they no longer match (e.g. after
 `pi-install` recorded something), it rebuilds `pi-sandbox` automatically
 before starting the sandbox again. Running sessions keep their current

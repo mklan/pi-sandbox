@@ -40,6 +40,17 @@ if command -v pi-extensions-sync >/dev/null 2>&1; then
   pi-extensions-sync || echo "pi-entrypoint: warning: extension sync had failures" >&2
 fi
 
+# pi default-model wrapper: /home/pi/.local/bin/pi shadows the real
+# /usr/local/bin/pi (first in PATH) so a bare `pi` in any herdr pane
+# respects PI_DEFAULT_* — not just workspaces opened via run.sh.
+# (Re)installed on every boot so host edits to container/pi-wrapper.sh
+# (compose bind-mount) take effect on restart even before the next rebuild
+# bakes them in. Never fatal — worst case a bare `pi` uses pi's own default.
+if [[ -f /opt/pi-service/pi-wrapper.sh ]]; then
+  cp /opt/pi-service/pi-wrapper.sh /home/pi/.local/bin/pi 2>/dev/null \
+    && chmod 0755 /home/pi/.local/bin/pi 2>/dev/null || true
+fi
+
 if [[ $# -eq 0 ]]; then
   # the container's main process: herdr owns every terminal here and keeps
   # it running until the container stops. Clients attach with `herdr`
@@ -49,12 +60,28 @@ fi
 
 if [[ "$1" == pi ]]; then
   shift
+  # Management subcommands never take model flags — pass through untouched.
+  # (Mirrors container/pi-wrapper.sh; keep the two in sync.)
+  pos=""
+  for a in "$@"; do
+    [[ "$a" == "--" ]] && break
+    case "$a" in
+      -*) continue ;;
+      *) pos="$a"; break ;;
+    esac
+  done
+  case " $pos " in
+    *" install "*|*" remove "*|*" uninstall "*|*" update "*|*" list "*|*" config "*|*" auth "*|*" mcp "*)
+      exec /usr/local/bin/pi "$@" ;;
+  esac
   user_chose_model=0
   user_chose_thinking=0
   for a in "$@"; do
+    [[ "$a" == "--" ]] && break
     case "$a" in
       --model|--model=*|-m|--models|--models=*) user_chose_model=1 ;;
       --thinking|--thinking=*) user_chose_thinking=1 ;;
+      --help|-h|--version|-v|--list-models|--list-models=*) exec /usr/local/bin/pi "$@" ;;
     esac
   done
 
@@ -69,7 +96,7 @@ if [[ "$1" == pi ]]; then
     pre+=(--thinking "$PI_DEFAULT_THINKING")
   fi
 
-  exec pi "${pre[@]}" "$@"
+  exec /usr/local/bin/pi ${pre[@]+"${pre[@]}"} "$@"
 fi
 
 exec "$@"

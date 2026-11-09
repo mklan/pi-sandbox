@@ -344,6 +344,7 @@ image_stamp() {
   sha256sum "$SERVICE_DIR/container/Dockerfile" "$SERVICE_DIR/container/pi-install.sh" \
     "$SERVICE_DIR/container/pi-entrypoint.sh" "$SERVICE_DIR/container/install-herdr.sh" \
     "$SERVICE_DIR/container/pi-extensions.txt" "$SERVICE_DIR/container/pi-extensions-sync.sh" \
+    "$SERVICE_DIR/container/pi-wrapper.sh" \
     2>/dev/null | sha256sum | cut -c1-16
 }
 

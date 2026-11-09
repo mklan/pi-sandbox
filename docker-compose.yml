@@ -72,6 +72,10 @@ services:
       # read-only so the entrypoint picks up host edits on the next
       # container start even before a rebuild bakes them in.
       - ./container/pi-extensions.txt:/opt/pi-service/pi-extensions.txt:ro
+      # Default-model wrapper (see container/pi-wrapper.sh): mounted
+      # read-only so the entrypoint reinstalls host edits on the next
+      # container start even before a rebuild bakes them in.
+      - ./container/pi-wrapper.sh:/opt/pi-service/pi-wrapper.sh:ro
       # Optional: ssh keys for git-over-ssh (read-only; ssh may warn that it
       # cannot update known_hosts — that is intentional):
       # - /home/you/.ssh:/home/pi/.ssh:ro

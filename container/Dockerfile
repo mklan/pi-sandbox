@@ -103,6 +103,17 @@ RUN chmod 0755 /usr/local/bin/pi-install \
 COPY container/pi-entrypoint.sh /usr/local/bin/pi-entrypoint
 RUN chmod 0755 /usr/local/bin/pi-entrypoint
 
+# --- pi wrapper: bare `pi` respects PI_DEFAULT_* (see pi-wrapper.sh) -----
+# Installed as /home/pi/.local/bin/pi (first in PATH), shadowing the real
+# /usr/local/bin/pi, which the wrapper execs by absolute path. Also kept at
+# /opt/pi-service/pi-wrapper.sh so the entrypoint can (re)install it on
+# every boot — host edits via the compose bind-mount take effect on restart
+# even before the next rebuild bakes them in.
+COPY container/pi-wrapper.sh /opt/pi-service/pi-wrapper.sh
+RUN chmod 0755 /opt/pi-service/pi-wrapper.sh \
+  && cp /opt/pi-service/pi-wrapper.sh /home/pi/.local/bin/pi \
+  && chown pi:pi /home/pi/.local/bin/pi
+
 # Pre-create the pi home dir so the named volume (see docker-compose.yml)
 # inherits pi:pi ownership instead of root.
 RUN mkdir -p /home/pi/.pi/agent \
