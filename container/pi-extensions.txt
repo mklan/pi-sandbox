@@ -17,7 +17,7 @@
 #   - the container entrypoint re-checks this file on every start and
 #     installs whatever is declared but missing, so adding a line takes
 #     effect on the next container start even before a rebuild.
-#   - `run.sh` hashes this file into the image stamp and rebuilds
+#   - `pi-run` hashes this file into the image stamp and rebuilds
 #     automatically when it changes.
 #
 # Inside a session, prefer declaring the extension here over a bare

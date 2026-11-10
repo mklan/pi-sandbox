@@ -7,7 +7,7 @@
 # The real binary is exec'd by absolute path (/usr/local/bin/pi), so there
 # is no recursion.
 #
-# Rule (mirrors container/pi-entrypoint.sh and run.sh pi_default_flags):
+# Rule (mirrors container/pi-entrypoint.sh and pi-run pi_default_flags):
 # inject PI_DEFAULT_PROVIDER/MODEL/THINKING unless the caller picked a model
 # or thinking level themselves. Flags passed by the caller always win.
 # Management subcommands (install/remove/...) and help/version queries never

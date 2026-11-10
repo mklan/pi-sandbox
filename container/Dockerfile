@@ -1,6 +1,6 @@
 # Pi coding-agent sandbox image.
 #
-# Build from the repository root:  docker compose build  (or ./run.sh)
+# Build from the repository root:  docker compose build  (or pi-run)
 #
 # pi runs as a non-root user whose uid/gid match the host user (build args
 # USER_UID/USER_GID, default 1000), so files written into the mounted
@@ -10,7 +10,7 @@
 # with `pi-install <pkg>` — that installs into the running container and
 # records the package in the apt list below, so it is baked into the image
 # at the next build. The file is mounted into the running container at
-# /opt/pi-service/Dockerfile (see docker-compose.yml); `run.sh` compares
+# /opt/pi-service/Dockerfile (see docker-compose.yml); `pi-run` compares
 # the PI_STAMP label against the image sources and rebuilds automatically
 # before starting a new session.
 
@@ -171,7 +171,7 @@ RUN mkdir -p /home/pi/.config \
 # same setup per-user, but ~/.gitconfig itself is container-local.
 RUN git config --system credential.helper '!gh auth git-credential'
 
-# --- image stamp (run.sh rebuilds when this no longer matches) -----------
+# --- image stamp (pi-run rebuilds when this no longer matches) -----------
 ARG PI_STAMP=unstamped
 LABEL pi.service.stamp="${PI_STAMP}"
 

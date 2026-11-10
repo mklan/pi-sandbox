@@ -42,7 +42,7 @@ fi
 
 # pi default-model wrapper: /home/pi/.local/bin/pi shadows the real
 # /usr/local/bin/pi (first in PATH) so a bare `pi` in any herdr pane
-# respects PI_DEFAULT_* — not just workspaces opened via run.sh.
+# respects PI_DEFAULT_* — not just workspaces opened via pi-run.
 # (Re)installed on every boot so host edits to container/pi-wrapper.sh
 # (compose bind-mount) take effect on restart even before the next rebuild
 # bakes them in. Never fatal — worst case a bare `pi` uses pi's own default.
@@ -62,7 +62,7 @@ fi
 if [[ $# -eq 0 ]]; then
   # the container's main process: herdr owns every terminal here and keeps
   # it running until the container stops. Clients attach with `herdr`
-  # (run.sh does that from the host).
+  # (pi-run does that from the host).
   exec herdr server
 fi
 
