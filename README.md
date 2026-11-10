@@ -156,6 +156,27 @@ skips the defaults entirely (including the default provider, since your
 model may belong to another one). Management subcommands (`install`,
 `list`, `auth`, ...) never get model flags injected.
 
+## Parallel agents in one repo (worktrees)
+
+Two agents editing the same checkout clobber each other. Inside the
+sandbox, parallel agents in one repo each get their own git worktree on
+their own feature branch via the `pi-worktree` helper (see
+`container/AGENTS.md` "Parallel agents" for the full lifecycle the
+agents follow):
+
+```bash
+pi-run shell ~/code/my-project                  # in the repo root, on main
+pi-worktree create login-form                   # .worktrees/login-form on agent/login-form
+# ... start the agent with its cwd in .worktrees/login-form ...
+pi-worktree finish login-form                   # pushes the branch, removes the worktree
+```
+
+Removing a worktree never loses committed work (it lives on the branch) —
+review/merge the branch in the main checkout afterwards, then delete it.
+The helper ships in the image (`container/pi-worktree.sh`); host edits to
+it are picked up on container restart and baked in at the next rebuild,
+like `pi-wrapper.sh`.
+
 ## Credentials & git-over-ssh
 
 - Put provider API keys in `.env.secrets` (see `.env.secrets.example`).

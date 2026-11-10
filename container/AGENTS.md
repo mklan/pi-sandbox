@@ -137,6 +137,66 @@ requests: they always mean the current workspace, never more.
   push"). Pushing never switches branches — push the current branch
   (ask first if it has no upstream or the remote has diverged).
 
+## Parallel agents: one worktree per agent
+
+When more than one agent works in the same repo at the same time — herdr
+agents, pi subagents, or parallel `pi-run ... "prompt"` sessions —
+every agent gets its own **git worktree on its own feature branch**.
+Never let two agents edit the same checkout: they clobber each other's
+files, builds, and git state. This is the standard approach (same pattern
+as CI checkouts and the worktree flows in Claude Code / Cursor / Jules):
+cheap (one shared `.git`, no re-clone), fully isolated working tree per
+agent, and the branch keeps the work after the worktree directory is gone.
+
+Use the `pi-worktree` helper (on `PATH` in every session) — do not
+hand-roll `git worktree` commands with ad-hoc paths and branch names:
+
+```bash
+pi-worktree create <slug> [--base main]   # <root>/.worktrees/<slug> on branch agent/<slug>
+pi-worktree list                           # all worktrees, branches, clean/dirty
+pi-worktree finish <slug>                  # push branch + remove worktree (end of task)
+pi-worktree remove <slug> [--delete-branch]# remove worktree, keep the branch by default
+pi-worktree prune                          # drop stale metadata
+```
+
+### Lifecycle
+
+1. **Create (supervisor, in the repo root, on `main`, clean tree):**
+   `pi-worktree create <slug>` — one short lowercase slug per task
+   (`login-form`, `billing-csv`). The branch is `agent/<slug>`;
+   collisions auto-suffix (`-2`, `-3`).
+2. **Start the agent IN the worktree** and keep it there for the whole
+   task — e.g. `herdr pane split --current --direction right --cwd
+   <path> --no-focus`, then `herdr agent start <name> --kind pi --pane
+   <id>`. Never `cd` back to the shared root to edit files.
+3. **Set up inside the worktree:** ignored files are NOT copied —
+   reinstall deps (`npm ci`, …), copy needed `.env`/local files from the
+   root, never commit secrets. Give each agent its own ports/services.
+4. **Finish (agent):** commit on its branch, then `pi-worktree finish
+   <slug>` — pushes (`-u origin`) and removes its own worktree.
+   Report the **branch name** back to the supervisor. Cleanup is
+   automatic at this point: removing a worktree never loses committed
+   work (it lives on the branch); only uncommitted work is at risk, and
+   `finish`/`remove` refuse a dirty tree unless `--force`.
+5. **Merge (supervisor, in the main checkout):** review, `git switch
+   main && git merge --no-ff agent/<slug>`, then `git branch -d
+   agent/<slug>` and `pi-worktree prune`.
+
+### Rules
+
+- One branch per worktree. Never check out a worker's branch anywhere
+  else while it runs; never commit to `main`/`master` from a worktree.
+- The main checkout stays on `main` and clean — the supervisor does not
+  edit files there while workers run.
+- One writer per worktree — agents never touch another agent's worktree.
+- Shared mutable state still collides (DB files, fixed-port dev servers,
+  devices/cloud resources) — coordinate ports and allocations in the task
+  prompt; worktrees isolate files, not everything.
+- Rebase a worker onto fresh `main` inside its own worktree when needed;
+  conflicts are that agent's job, resolved on its branch.
+- Non-git folders cannot use worktrees — copy the folder (`cp -a`, one
+  copy per agent) instead.
+
 ## Rules of the house
 
 - Prefer the preinstalled tools; install only what is genuinely missing.
