@@ -40,6 +40,25 @@ RUN apt-get update \
     unzip \
     zip \
     gh \
+    libcups2 \
+    libasound2 \
+    libatspi2.0-0 \
+    libglib2.0-0 \
+    libnss3 \
+    libnspr4 \
+    libdbus-1-3 \
+    libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libdrm2 \
+    libxkbcommon0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxfixes3 \
+    libxrandr2 \
+    libgbm1 \
+    libpango-1.0-0 \
+    libcairo2 \
+    chromium \
   && rm -rf /var/lib/apt/lists/*
 
 # --- non-root user matching the host user --------------------------------
@@ -64,6 +83,13 @@ RUN set -e; \
 # --- preinstall pi -------------------------------------------------------
 ARG PI_VERSION=1.5.0
 RUN npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@${PI_VERSION}"
+
+# --- preinstall vibeflow CLI (task board CLI used by workspace hooks) --------
+# Provides the `vibeflow` (alias `vf`) command that .vibeflow-commander-hook
+# agent prompts rely on (`vibeflow tasks ...`). Pinned like pi: reinstalling
+# or upgrading inside a session only changes the running container.
+ARG VIBEFLOW_VERSION=0.27.1
+RUN npm install -g "@vibeflow-tools/cli@${VIBEFLOW_VERSION}"
 
 # --- preinstall herdr (terminal runtime for coding agents) ----------------
 # herdr runs every terminal in this container (see container/AGENTS.md) and
