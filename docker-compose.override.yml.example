@@ -22,6 +22,11 @@ services:
       # git-over-ssh (read-only; ssh warns that it cannot update
       # known_hosts — that is intentional):
       # - /home/you/.ssh:/home/pi/.ssh:ro
+      # Docker daemon socket (opt-in, host-root-equivalent — see README):
+      # lets agents run docker / docker compose for e2e tests. After
+      # uncommenting, rebuild once with the host's docker GID:
+      #   DOCKER_GID=$(getent group docker | cut -d: -f3) docker compose build
+      # - /var/run/docker.sock:/var/run/docker.sock
     # Resource limits — adjust to your machine.
     deploy:
       resources:

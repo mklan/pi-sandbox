@@ -59,6 +59,12 @@ if [[ -f /opt/pi-service/pi-worktree.sh ]]; then
     && chmod 0755 /usr/local/bin/pi-worktree 2>/dev/null || true
 fi
 
+# Docker socket (opt-in via docker-compose.override.yml): point at the fix
+# when `docker ps` fails, instead of leaving a permission mystery.
+if [[ ! -S /var/run/docker.sock ]]; then
+  echo "pi-entrypoint: note: no docker socket mounted — enable it in docker-compose.override.yml for e2e tests (see README)" >&2
+fi
+
 if [[ $# -eq 0 ]]; then
   # the container's main process: herdr owns every terminal here and keeps
   # it running until the container stops. Clients attach with `herdr`

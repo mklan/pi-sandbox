@@ -14,7 +14,7 @@
 # the PI_STAMP label against the image sources and rebuilds automatically
 # before starting a new session.
 
-FROM node:24-bookworm-slim
+FROM debian:bookworm-slim
 
 # --- apt packages (one per line, keep alphabetical) ----------------------
 # pi-install appends packages on the fly here (directly above the cleanup
@@ -38,6 +38,7 @@ RUN apt-get update \
     sudo \
     tmux \
     unzip \
+    xz-utils \
     zip \
     gh \
     libcups2 \
@@ -62,8 +63,9 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 
 # --- non-root user matching the host user --------------------------------
-# The node base image already ships a uid/gid 1000 "node" user — rename and
-# reuse it if it matches, create "pi" otherwise.
+# Created fresh on this base (plain debian ships no node user), so files
+# written into the mounted /workspace folders are owned by you instead
+# of root.
 ARG USER_UID=1000
 ARG USER_GID=1000
 RUN set -e; \
@@ -79,6 +81,54 @@ RUN set -e; \
   else \
     useradd --uid "${USER_UID}" --gid "${USER_GID}" --create-home --shell /bin/bash pi; \
   fi
+
+# --- Node.js (our main stack) from the official tarball ------------------
+# Pinned via NODE_VERSION for reproducible builds; bump with
+# `pi-run upgrade-node`. Installed system-wide so node/npm/npx work for
+# root and pi alike (global npm packages land in /usr/local).
+ARG NODE_VERSION=24.22.2
+RUN set -e; \
+  arch="$(dpkg --print-architecture)"; \
+  case "$arch" in amd64) node_arch=x64 ;; arm64) node_arch=arm64 ;; \
+    *) echo "node: unsupported architecture: $arch" >&2; exit 1 ;; esac; \
+  cd /tmp; \
+  curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.xz"; \
+  curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt"; \
+  grep "node-v${NODE_VERSION}-linux-${node_arch}.tar.xz" SHASUMS256.txt | sha256sum -c -; \
+  tar -xJf "node-v${NODE_VERSION}-linux-${node_arch}.tar.xz" -C /usr/local --strip-components=1; \
+  rm -f "node-v${NODE_VERSION}-linux-${node_arch}.tar.xz" SHASUMS256.txt; \
+  node --version && npm --version
+
+# --- Docker CLI + compose plugin (host daemon via socket) ----------------
+# No dockerd inside: a privileged DinD daemon would void the sandbox
+# hardening (see README.md). Instead the CLI talks to the host daemon
+# through a bind-mounted /var/run/docker.sock (opt-in per machine, see
+# docker-compose.yml) — the devcontainer-standard docker-outside-of-docker
+# setup, enough for agents to build images and run e2e stacks.
+# Pinned like everything else; bump with `pi-run upgrade-docker` /
+# `pi-run upgrade-compose`.
+ARG DOCKER_VERSION=29.9.3
+ARG COMPOSE_VERSION=v5.7.0
+ARG DOCKER_GID=999
+RUN set -e; \
+  arch="$(dpkg --print-architecture)"; \
+  case "$arch" in amd64) docker_arch=x86_64 ;; arm64) docker_arch=aarch64 ;; \
+    *) echo "docker: unsupported architecture: $arch" >&2; exit 1 ;; esac; \
+  cd /tmp; \
+  curl -fsSLO "https://download.docker.com/linux/static/stable/${docker_arch}/docker-${DOCKER_VERSION}.tgz"; \
+  tar -xzf "docker-${DOCKER_VERSION}.tgz" -C /tmp; \
+  mv /tmp/docker/docker /usr/local/bin/docker; \
+  rm -rf "docker-${DOCKER_VERSION}.tgz" /tmp/docker; \
+  mkdir -p /usr/local/lib/docker/cli-plugins; \
+  curl -fsSL "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-linux-${docker_arch}" \
+    -o /usr/local/lib/docker/cli-plugins/docker-compose; \
+  chmod 0755 /usr/local/bin/docker /usr/local/lib/docker/cli-plugins/docker-compose; \
+  docker --version && docker compose version; \
+  if getent group docker >/dev/null; then echo "docker group exists"; \
+  elif getent group "${DOCKER_GID}" >/dev/null; then \
+    echo "ERROR: GID ${DOCKER_GID} is taken by another group — rebuild with --build-arg DOCKER_GID=<host docker gid>" >&2; exit 1; \
+  else groupadd --gid "${DOCKER_GID}" docker; fi; \
+  usermod -aG docker pi
 
 # --- preinstall pi -------------------------------------------------------
 ARG PI_VERSION=1.5.0

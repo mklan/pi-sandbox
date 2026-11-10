@@ -15,6 +15,9 @@
 #   pi-run down                       stop the sandbox (everything stops)
 #   pi-run upgrade [version]          pin pi in the Dockerfile and rebuild
 #   pi-run upgrade-herdr [version]    pin herdr in the Dockerfile and rebuild
+#   pi-run upgrade-node [version]     pin Node.js in the Dockerfile and rebuild
+#   pi-run upgrade-docker [version]   pin the Docker CLI in the Dockerfile and rebuild
+#   pi-run upgrade-compose [version]  pin the compose plugin in the Dockerfile and rebuild
 #   pi-run help                       this text
 #
 # The sandbox container runs herdr (herdr.dev) as its main process. herdr
@@ -711,6 +714,76 @@ cmd_upgrade_herdr() {
   echo "done — new sessions run herdr $ver"
 }
 
+# Same for the compose plugin: pinned via ARG COMPOSE_VERSION. Without a
+# version it follows the releases/latest redirect on GitHub.
+cmd_upgrade_compose() {
+  local ver="${1:-}" old
+  if [[ -z "$ver" ]]; then
+    if ! ver="$(curl -fsSL --max-time 20 -o /dev/null -w '%{url_effective}' \
+        https://github.com/docker/compose/releases/latest 2>/dev/null | sed 's#.*/tag/##')"; then
+      die "could not query github for the latest compose release"
+    fi
+  fi
+  [[ "$ver" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+    || die "invalid version: $ver (want vX.Y.Z)"
+  old="$(sed -n 's/^ARG COMPOSE_VERSION=//p' "$SERVICE_DIR/container/Dockerfile")"
+  if [[ "$old" == "$ver" ]]; then
+    echo "compose plugin already pinned to $ver in Dockerfile"
+  else
+    sed -i "s/^ARG COMPOSE_VERSION=.*/ARG COMPOSE_VERSION=${ver}/" "$SERVICE_DIR/container/Dockerfile"
+    echo "compose plugin pinned to $ver in Dockerfile (was ${old:-unset})"
+  fi
+  ensure_image
+  echo "done — new sessions run compose $ver"
+}
+
+# Same for Node.js: pinned via ARG NODE_VERSION (no leading v in the file).
+# Without a version it takes the newest v24.x from nodejs.org.
+cmd_upgrade_node() {
+  local ver="${1:-}" old
+  if [[ -z "$ver" ]]; then
+    if ! ver="$(curl -fsSL --max-time 20 https://nodejs.org/dist/index.json 2>/dev/null \
+        | grep -o '"version":"v24\.[0-9.]*"' | head -1 | cut -d'"' -f4 | sed 's/^v//')"; then
+      die "could not query nodejs.org for the latest v24 release"
+    fi
+  fi
+  ver="${ver#v}"
+  [[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+    || die "invalid version: $ver (want X.Y.Z)"
+  old="$(sed -n 's/^ARG NODE_VERSION=//p' "$SERVICE_DIR/container/Dockerfile")"
+  if [[ "$old" == "$ver" ]]; then
+    echo "node already pinned to $ver in Dockerfile"
+  else
+    sed -i "s/^ARG NODE_VERSION=.*/ARG NODE_VERSION=${ver}/" "$SERVICE_DIR/container/Dockerfile"
+    echo "node pinned to $ver in Dockerfile (was ${old:-unset})"
+  fi
+  ensure_image
+  echo "done — new sessions run node $ver"
+}
+
+# Same for the Docker CLI: pinned via ARG DOCKER_VERSION. Without a
+# version it takes the newest stable static build from download.docker.com.
+cmd_upgrade_docker() {
+  local ver="${1:-}" old
+  if [[ -z "$ver" ]]; then
+    if ! ver="$(curl -fsSL --max-time 20 https://download.docker.com/linux/static/stable/x86_64/ 2>/dev/null \
+        | grep -o 'docker-[0-9][0-9.]*\.tgz' | sed 's/^docker-//; s/\.tgz$//' | sort -V | tail -1)"; then
+      die "could not query download.docker.com for the latest release"
+    fi
+  fi
+  [[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+    || die "invalid version: $ver (want X.Y.Z)"
+  old="$(sed -n 's/^ARG DOCKER_VERSION=//p' "$SERVICE_DIR/container/Dockerfile")"
+  if [[ "$old" == "$ver" ]]; then
+    echo "docker CLI already pinned to $ver in Dockerfile"
+  else
+    sed -i "s/^ARG DOCKER_VERSION=.*/ARG DOCKER_VERSION=${ver}/" "$SERVICE_DIR/container/Dockerfile"
+    echo "docker CLI pinned to $ver in Dockerfile (was ${old:-unset})"
+  fi
+  ensure_image
+  echo "done — new sessions run docker $ver"
+}
+
 case "${1:-}" in
   ""|open) shift 2>/dev/null || true; cmd_open "$@" ;;
   ls|list|ps) shift; cmd_ls "$@" ;;
@@ -720,6 +793,9 @@ case "${1:-}" in
   down) shift; cmd_down "$@" ;;
   upgrade|up|update) shift; cmd_upgrade "$@" ;;
   upgrade-herdr) shift; cmd_upgrade_herdr "$@" ;;
+  upgrade-node) shift; cmd_upgrade_node "$@" ;;
+  upgrade-docker) shift; cmd_upgrade_docker "$@" ;;
+  upgrade-compose) shift; cmd_upgrade_compose "$@" ;;
   help|-h|--help) usage ;;
   *) cmd_open "$@" ;;
 esac
