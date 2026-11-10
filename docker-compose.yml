@@ -76,6 +76,9 @@ services:
       # read-only so the entrypoint reinstalls host edits on the next
       # container start even before a rebuild bakes them in.
       - ./container/pi-wrapper.sh:/opt/pi-service/pi-wrapper.sh:ro
+      # Worktree helper (see container/pi-worktree.sh): same overlay trick —
+      # host edits are reinstalled to PATH by the entrypoint on every boot.
+      - ./container/pi-worktree.sh:/opt/pi-service/pi-worktree.sh:ro
       # Optional: ssh keys for git-over-ssh (read-only; ssh may warn that it
       # cannot update known_hosts — that is intentional):
       # - /home/you/.ssh:/home/pi/.ssh:ro

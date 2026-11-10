@@ -140,6 +140,15 @@ RUN chmod 0755 /opt/pi-service/pi-wrapper.sh \
   && cp /opt/pi-service/pi-wrapper.sh /home/pi/.local/bin/pi \
   && chown pi:pi /home/pi/.local/bin/pi
 
+# --- pi-worktree helper: one isolated git worktree per parallel agent ----
+# Source lives at /opt/pi-service/pi-worktree.sh (bind-mounted from the
+# host, see docker-compose.yml) and is (re)installed to PATH on every
+# boot by the entrypoint, so host edits take effect on restart even before
+# the next rebuild bakes them in. See container/AGENTS.md.
+COPY container/pi-worktree.sh /opt/pi-service/pi-worktree.sh
+RUN chmod 0755 /opt/pi-service/pi-worktree.sh \
+  && cp /opt/pi-service/pi-worktree.sh /usr/local/bin/pi-worktree
+
 # Pre-create the pi home dir so the named volume (see docker-compose.yml)
 # inherits pi:pi ownership instead of root.
 RUN mkdir -p /home/pi/.pi/agent \

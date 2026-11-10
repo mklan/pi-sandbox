@@ -51,6 +51,14 @@ if [[ -f /opt/pi-service/pi-wrapper.sh ]]; then
     && chmod 0755 /home/pi/.local/bin/pi 2>/dev/null || true
 fi
 
+# pi-worktree helper (see container/pi-worktree.sh): (re)installed to PATH
+# on every boot so host edits via the compose bind-mount take effect on
+# restart even before the next rebuild bakes them in. Never fatal.
+if [[ -f /opt/pi-service/pi-worktree.sh ]]; then
+  cp /opt/pi-service/pi-worktree.sh /usr/local/bin/pi-worktree 2>/dev/null \
+    && chmod 0755 /usr/local/bin/pi-worktree 2>/dev/null || true
+fi
+
 if [[ $# -eq 0 ]]; then
   # the container's main process: herdr owns every terminal here and keeps
   # it running until the container stops. Clients attach with `herdr`
