@@ -14,7 +14,7 @@ command here lives in a herdr pane and keeps running across SSH
 disconnects, TUI clients attaching/detaching, and even container
 recreations (herdr restores the workspace layout and resumes pi sessions
 from its state in `/home/pi/.pi/agent/herdr`). The user attaches with the
-herdr TUI from the host (`./run.sh` on the host side) — there is no tmux
+herdr TUI from the host (`pi-run` on the host side) — there is no tmux
 involved anywhere.
 
 If `test "${HERDR_ENV:-}" = 1` succeeds, **you are running inside a herdr
@@ -144,7 +144,7 @@ requests: they always mean the current workspace, never more.
 - pi's own version is pinned in the Dockerfile (`ARG PI_VERSION`), and so
   is herdr (`ARG HERDR_VERSION`). Do not run `pi update` or `herdr update`
   — it would only change this throwaway container. If a version change is
-  needed, tell the user to run `./run.sh upgrade` or `./run.sh
+  needed, tell the user to run `pi-run upgrade` or `pi-run
   upgrade-herdr` on the host.
 - `pi-install` accepts plain Debian package names only (no flags, no
   paths) — do not try to work around that or to escalate privileges in any

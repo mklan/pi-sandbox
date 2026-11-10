@@ -16,7 +16,7 @@
 # docker-compose.override.yml.example to get started (it is git-ignored,
 # so personal paths never end up in the repo).
 #
-# Usage: ./run.sh  (or see README.md)
+# Usage: pi-run  (or see README.md)
 
 services:
   pi:
@@ -31,13 +31,13 @@ services:
     # Long-running sandbox: the container's main process is `herdr server`
     # (see container/AGENTS.md) — a terminal runtime that keeps every pane,
     # agent and command alive until the container stops. Start it with
-    # `./run.sh`, which attaches the herdr TUI via `docker exec`.
+    # `pi-run`, which attaches the herdr TUI via `docker exec`.
     restart: unless-stopped
     environment:
-      # Default model for pi when run.sh opens a new workspace (or when
+      # Default model for pi when pi-run opens a new workspace (or when
       # pi is started through pi-entrypoint). Set these in
       # docker-compose.override.yml (or the shell env, e.g.
-      # PI_DEFAULT_MODEL=other-model ./run.sh ...). Leave empty to let each
+      # PI_DEFAULT_MODEL=other-model pi-run ...). Leave empty to let each
       # caller decide — flags passed to pi win over these anyway.
       PI_DEFAULT_PROVIDER: ${PI_DEFAULT_PROVIDER:-}
       PI_DEFAULT_MODEL: ${PI_DEFAULT_MODEL:-}
@@ -54,7 +54,7 @@ services:
       #   - /path/on/the/host:/workspace/<name>
       #
       # Everything under /workspace maps to those folders and is written
-      # with your uid/gid; nothing else on the host is reachable. run.sh
+      # with your uid/gid; nothing else on the host is reachable. pi-run
       # accepts exactly the folders mounted here as workspace folders.
       #
       # Container-local pi home — keeps container credentials/settings/

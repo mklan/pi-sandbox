@@ -1,6 +1,6 @@
 # Personal settings for one machine. Copy to docker-compose.override.yml
 # (git-ignored) and adjust — docker compose merges it into
-# docker-compose.yml automatically, so `./run.sh` and `docker compose ...`
+# docker-compose.yml automatically, so `pi-run` and `docker compose ...`
 # see the merged result without extra flags.
 
 services:

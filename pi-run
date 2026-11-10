@@ -2,16 +2,20 @@
 # pi sandbox launcher — one herdr inside the container, one shortcut on
 # the host.
 #
-#   ./run.sh [-b]                       open herdr for the current folder
-#   ./run.sh [-b] [path] [pi-args...]   open herdr on the folder's workspace
-#   ./run.sh ls [-w]                    list workspaces and agents (-w: live)
-#   ./run.sh log <path|name>            show a workspace's current screen
-#   ./run.sh shell [path|name] [cmd...] bash in the sandbox at the folder
-#   ./run.sh kill <path|name|--all>     close one or all workspaces
-#   ./run.sh down                       stop the sandbox (everything stops)
-#   ./run.sh upgrade [version]          pin pi in the Dockerfile and rebuild
-#   ./run.sh upgrade-herdr [version]    pin herdr in the Dockerfile and rebuild
-#   ./run.sh help                       this text
+#   pi-run [-b] [--tab] [path] [pi-args...]
+#                                       open herdr on the folder's workspace
+#                                       (pi-args always start a FRESH pi
+#                                       session in a new pane (or, with --tab,
+#                                       in a new tab); no args
+#                                       reattaches to the running one)
+#   pi-run ls [-w]                    list workspaces and agents (-w: live)
+#   pi-run log <path|name>            show a workspace's current screen
+#   pi-run shell [path|name] [cmd...] bash in the sandbox at the folder
+#   pi-run kill <path|name|--all>     close one or all workspaces
+#   pi-run down                       stop the sandbox (everything stops)
+#   pi-run upgrade [version]          pin pi in the Dockerfile and rebuild
+#   pi-run upgrade-herdr [version]    pin herdr in the Dockerfile and rebuild
+#   pi-run help                       this text
 #
 # The sandbox container runs herdr (herdr.dev) as its main process. herdr
 # is a terminal workspace manager for coding agents: one workspace per
@@ -24,6 +28,9 @@
 # focuses it, and drops you into the herdr TUI. First open of a folder
 # starts pi in its workspace (with the PI_DEFAULT_* model defaults, like
 # before); everything that runs there keeps running until you close it.
+# With no extra args an existing workspace is just focused. With extra
+# args (a prompt and/or pi flags) a fresh pi session is always started in
+# a new pane of that workspace, leaving the old session running.
 #
 # Inside the TUI: detach with ctrl+b q — panes and agents keep working.
 # Re-attach by running this script again (any folder, or none for the
@@ -37,13 +44,13 @@
 # becomes a valid workspace folder. A bare folder name works too when it is
 # unambiguous (any folder under one of the mounts is found by name), and so
 # does a workspace name (its label) or id (w1, w2, ...). With no path at
-# all, run.sh opens the current folder; from outside the mounts it just
+# all, pi-run opens the current folder; from outside the mounts it just
 # attaches wherever you left off.
 set -euo pipefail
 
 SERVICE_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 
-err() { printf 'run.sh: %s\n' "$*" >&2; }
+err() { printf 'pi-run: %s\n' "$*" >&2; }
 die() { err "$*"; exit 1; }
 
 usage() {
@@ -198,7 +205,7 @@ host_path_from_ctr() {
 }
 
 # display form: the container path minus the /workspace prefix, e.g.
-# "stack/services/pi"
+# "stack/services/pi-sandbox"
 short_path() {
   local m mh mc
   m="$(mount_for_host "$1")"
@@ -218,14 +225,23 @@ compose() { (cd "$SERVICE_DIR" && docker compose "$@"); }
 CTR=""
 
 # the running sandbox container id (empty when the service is down)
+# NOTE: the compose service name is auto-detected (first service in the
+# compose config), so renaming the service key (pi <-> pi-sandbox) does
+# not break this script.
 find_ctr() {
   [[ -n "$CTR" ]] && return 0
-  CTR="$(compose ps -q pi 2>/dev/null | head -1)"
+  local svc
+  svc="$(compose config --services 2>/dev/null | head -1)"
+  [[ -n "$svc" ]] || svc="pi"
+  CTR="$(compose ps -q "$svc" 2>/dev/null | head -1)"
+  # fall back to any running container of this project (covers a rename
+  # where an old-named container is still up)
+  [[ -n "$CTR" ]] || CTR="$(compose ps -q 2>/dev/null | head -1)"
   [[ -n "$CTR" ]]
 }
 
 require_stack() {
-  find_ctr || die "the sandbox is not running — run ./run.sh to start it"
+  find_ctr || die "the sandbox is not running — run pi-run to start it"
   docker exec "$CTR" herdr status server >/dev/null 2>&1 \
     || die "the herdr server is not answering in the container — see: docker compose logs"
 }
@@ -256,7 +272,7 @@ hjq() { docker exec -i "$CTR" jq "$@"; }
 
 # --- workspaces ----------------------------------------------------------
 # Workspaces are found by id (w1...), by label (the folder's short path,
-# e.g. "stack/services/pi", unless renamed in the TUI), or by the folder
+# e.g. "stack/services/pi-sandbox", unless renamed in the TUI), or by the folder
 # itself (label match, then root-pane cwd match).
 
 ws_find_by_label() {
@@ -297,7 +313,7 @@ ws_resolve() {
   cpath="$(container_path "$abs")"
   lbl="$(short_path "$abs")"
   id="$(ws_find_by_folder "$lbl" "$cpath")"
-  [[ -n "$id" ]] || { err "no workspace for $abs — open it first: ./run.sh $abs"; return 1; }
+  [[ -n "$id" ]] || { err "no workspace for $abs — open it first: pi-run $abs"; return 1; }
   printf '%s\t%s\n' "$id" "$lbl"
 }
 
@@ -336,7 +352,97 @@ pi_default_flags() {
   fi
 }
 
-# --- image ---------------------------------------------------------------
+# fresh pi agent name for a folder: pi-<slug>-<hash>[-N], unique among
+# live agents and within herdr's 32-char name limit
+pick_agent_name() {
+  local base="pi-$(slugify "$(basename "$1")")"
+  base="${base:0:18}"
+  local h cand existing i
+  h="$(hash4 "$1")"
+  existing="$(hcli agent list | hjq -r '.result.agents[].name' 2>/dev/null)"
+  cand="${base}-${h}"
+  if ! grep -qx -- "$cand" <<<"$existing"; then printf '%s' "$cand"; return 0; fi
+  for ((i = 2; i < 100; i++)); do
+    cand="${base}-${h}-$i"
+    cand="${cand:0:32}"
+    if ! grep -qx -- "$cand" <<<"$existing"; then printf '%s' "$cand"; return 0; fi
+  done
+  cand="${base}-${h}-$RANDOM"
+  printf '%s' "${cand:0:32}"
+}
+
+# start a fresh pi in an existing shell pane: prints the agent name
+# CLI flags (pi options) go to `agent start`; free prompt text goes via
+# `agent prompt` — herdr rejects multiline prompt text as start args
+# (invalid_agent_argument), but accepts it via prompt.
+start_pi_in_pane() {
+  local pane="$1" abs="$2"; shift 2
+  pi_default_flags "$@"
+  local name
+  name="$(pick_agent_name "$abs")"
+  # split leading pi flags (and their values) from the prompt text
+  local start_args=() prompt_parts=() a needs_val=0
+  for a in "$@"; do
+    if [[ $needs_val -eq 1 ]]; then
+      start_args+=("$a")
+      needs_val=0
+      continue
+    fi
+    case "$a" in
+      --provider|--model|-m|--thinking|--timeout)
+        start_args+=("$a"); needs_val=1 ;;
+      --provider=*|--model=*|--thinking=*|-m*)
+        start_args+=("$a") ;;
+      -?*)
+        start_args+=("$a") ;;
+      *)
+        prompt_parts+=("$a") ;;
+    esac
+  done
+  if ! hcli agent start "$name" --kind pi --pane "$pane" \
+      --timeout 60000 -- ${PI_FLAGS[@]+"${PI_FLAGS[@]}"} ${start_args[@]+"${start_args[@]}"} >/dev/null; then
+    err "note: pi did not start as a recognized agent — the workspace is open, run pi in it yourself"
+    return 1
+  fi
+  if [[ ${#prompt_parts[@]} -gt 0 ]]; then
+    local prompt_text
+    printf -v prompt_text '%s ' "${prompt_parts[@]}"
+    prompt_text="${prompt_text% }"
+    if ! hcli agent prompt "$name" "$prompt_text" >/dev/null; then
+      err "note: pi started as $name but the prompt was rejected — type it in the pane yourself"
+    fi
+  fi
+  printf '%s\n' "$name"
+}
+
+# start a fresh pi session in a new tab of an existing workspace and start
+# pi there with the caller's args. Prints the agent name.
+new_pi_in_new_tab() {
+  local wid="$1" cdir="$2" abs="$3"; shift 3
+  local tab_out newpane
+  tab_out="$(hcli tab create --workspace "$wid" --cwd "$cdir" --focus)" \
+    || die "could not create a new tab in the workspace"
+  newpane="$(printf '%s' "$tab_out" | hjq -r '.result.root_pane.pane_id // empty')"
+  [[ -n "$newpane" ]] || die "could not read the new tab's pane id"
+  echo "starting a fresh pi session in $newpane"
+  start_pi_in_pane "$newpane" "$abs" "$@" || true
+}
+# start a fresh pi session in an existing workspace: split a new pane off a
+# live one and start pi there with the caller's args. Prints the agent name.
+new_pi_in_workspace() {
+  local wid="$1" cdir="$2" abs="$3"; shift 3
+  local base split_out newpane
+  # focused pane of the workspace, else its first pane
+  base="$(hcli pane list --workspace "$wid" 2>/dev/null \
+    | hjq -r '([.result.panes[] | select(.focused)][0] // .result.panes[0]).pane_id // empty')"
+  [[ -n "$base" ]] || die "no pane in workspace to split for a fresh pi session"
+  split_out="$(hcli pane split "$base" --direction right --cwd "$cdir")" \
+    || die "could not split a new pane in the workspace"
+  newpane="$(printf '%s' "$split_out" | hjq -r '.result.pane.pane_id // empty')"
+  [[ -n "$newpane" ]] || die "could not read the new pane id"
+  echo "starting a fresh pi session in $newpane"
+  start_pi_in_pane "$newpane" "$abs" "$@" || true
+}
 # The image is self-extending: pi-install records newly needed packages in
 # the Dockerfile. A stamp label in the image lets us detect that the image
 # no longer matches its sources and rebuild before starting anything.
@@ -344,7 +450,7 @@ image_stamp() {
   sha256sum "$SERVICE_DIR/container/Dockerfile" "$SERVICE_DIR/container/pi-install.sh" \
     "$SERVICE_DIR/container/pi-entrypoint.sh" "$SERVICE_DIR/container/install-herdr.sh" \
     "$SERVICE_DIR/container/pi-extensions.txt" "$SERVICE_DIR/container/pi-extensions-sync.sh" \
-    "$SERVICE_DIR/container/pi-wrapper.sh" \
+    "$SERVICE_DIR/container/pi-wrapper.sh" "$SERVICE_DIR/container/pi-worktree.sh" \
     2>/dev/null | sha256sum | cut -c1-16
 }
 
@@ -373,18 +479,23 @@ jump_to() {
   local wid="$1" label="$2" bg="$3"
   hcli workspace focus "$wid" >/dev/null || true
   if [[ $bg -eq 1 ]]; then
-    echo "opened $label — attach with: ./run.sh $label"
+    echo "opened $label — attach with: pi-run $label"
   else
     attach
   fi
 }
 
 cmd_open() {
-  local bg=0 path
-  while [[ "${1:-}" == -b || "${1:-}" == --background ]]; do
-    bg=1
+  local bg=0 newtab=0 path fresh=new_pi_in_workspace
+  while :; do
+    case "${1:-}" in
+      -b|--background) bg=1 ;;
+      --tab|--new-window) newtab=1 ;;
+      *) break ;;
+    esac
     shift
   done
+  if [[ $newtab -eq 1 ]]; then fresh=new_pi_in_new_tab; else fresh=new_pi_in_workspace; fi
   if [[ $# -gt 0 && "$1" != -* ]]; then
     path="$1"
     shift
@@ -413,7 +524,14 @@ cmd_open() {
       # not a folder — a workspace id (w3) or name, then
       out="$(ws_resolve "$path")" || exit 1
       IFS=$'\t' read -r wid label <<<"$out"
-      [[ $# -gt 0 ]] && echo "note: workspace exists, pi args ignored" >&2
+      if [[ $# -gt 0 ]]; then
+        abs="$(ws_host_path "$label")"
+        if [[ -n "$abs" ]]; then
+          "$fresh" "$wid" "$(container_path "$abs")" "$abs" "$@"
+        else
+          err "note: renamed workspace has no folder mapping, reusing live session"
+        fi
+      fi
       jump_to "$wid" "$label" "$bg"
       return
     fi
@@ -425,23 +543,20 @@ cmd_open() {
   wid="$(ws_find_by_folder "$lbl" "$cdir")"
 
   if [[ -n "$wid" ]]; then
-    [[ $# -gt 0 ]] && echo "note: workspace exists, pi args ignored" >&2
+    if [[ $# -gt 0 ]]; then
+      # prompt passed but workspace exists: fresh pi session in a new pane
+      # (or a new tab with --tab), the running session keeps running untouched
+      "$fresh" "$wid" "$cdir" "$abs" "$@"
+    fi
   else
     echo "opening workspace $lbl"
     out="$(hcli workspace create --cwd "$cdir" --label "$lbl" --focus)" \
       || die "could not create a herdr workspace for $abs"
     wid="$(printf '%s' "$out" | hjq -r '.result.workspace.workspace_id')"
     pid="$(printf '%s' "$out" | hjq -r '.result.root_pane.pane_id')"
-    # first open of the folder starts pi in its workspace — as before, with
+    # first open of the folder starts pi in its workspace, with
     # the PI_DEFAULT_* defaults unless the caller chose a model
-    pi_default_flags "$@"
-    local name
-    name="pi-$(slugify "$(basename "$abs")")"
-    name="${name:0:24}-$(hash4 "$abs")"
-    if ! hcli agent start "$name" --kind pi --pane "$pid" \
-        --timeout 60000 -- ${PI_FLAGS[@]+"${PI_FLAGS[@]}"} "$@" >/dev/null; then
-      err "note: pi did not start as a recognized agent — the workspace is open, run pi in it yourself"
-    fi
+    start_pi_in_pane "$pid" "$abs" "$@" || true
   fi
 
   jump_to "$wid" "$lbl" "$bg"
@@ -555,7 +670,7 @@ cmd_upgrade() {
   local ver="${1:-}" old
   if [[ -z "$ver" ]]; then
     command -v npm >/dev/null 2>&1 \
-      || die "npm not found on the host — pass a version: ./run.sh upgrade <version>"
+      || die "npm not found on the host — pass a version: pi-run upgrade <version>"
     if ! ver="$(npm view @earendil-works/pi-coding-agent version 2>/dev/null)"; then
       die "could not query npm for the latest version"
     fi
