@@ -197,6 +197,30 @@ pi-worktree prune                          # drop stale metadata
 - Non-git folders cannot use worktrees — copy the folder (`cp -a`, one
   copy per agent) instead.
 
+## Docker for e2e tests (host daemon)
+
+`docker` and `docker compose` are on `PATH`, but there is NO daemon
+inside — the CLI talks to the host daemon through a bind-mounted
+`/var/run/docker.sock` (docker-outside-of-docker; a privileged DinD
+daemon would void the hardening below, so it is deliberately not used).
+
+- Enabled per machine via the socket mount in
+  `docker-compose.override.yml`, plus one rebuild with the host's docker
+  GID (`DOCKER_GID=$(getent group docker | cut -d: -f3) docker compose
+  build`). If `docker ps` fails with permission denied, the mount or the
+  GID is wrong — that is the expected signal, never `chmod` the socket.
+- **Path mapping:** bind mounts in other projects' compose files resolve
+  on the HOST, where `/workspace/...` does not exist. Translate sandbox
+  paths to host paths first — the host source of every mount is visible
+  inside the sandbox via `grep workspace /proc/self/mountinfo`. When in
+  doubt, ask the supervisor for the host path instead of guessing.
+- **Restraint:** the daemon is shared with everything on the host. Name
+  test resources per task (`<slug>-...`), always `down -v` when done,
+  and never run host-wide commands (`docker system prune`, stopping or
+  touching other projects' containers/images).
+- Prefer `docker compose up --build --abort-on-container-exit` for e2e
+  runs so failures surface and nothing is left behind.
+
 ## Rules of the house
 
 - Prefer the preinstalled tools; install only what is genuinely missing.

@@ -116,6 +116,7 @@ your uid/gid.
 | Host `~/.pi/agent` **not** mounted; container keeps its own credentials/settings/sessions in the `pi-agent-home` volume | `docker-compose.yml` (`volumes`) |
 | API keys in `.env.secrets` (chmod 600, git-ignored) | `.env.secrets` |
 | Memory/CPU limits | `docker-compose.override.yml.example` (`deploy.resources`) |
+| Host docker socket: **not** mounted by default (socket access is host-root-equivalent — opt in per machine) | `docker-compose.override.yml` (see `README.md`) |
 
 Trade-off for the self-extending image: the rootfs is writable and
 `no-new-privileges` is off (sudo needs setuid), so the agent can become
@@ -215,8 +216,36 @@ image.
 Manual changes work the same way: edit the image sources in `container/`,
 and the next `pi-run` rebuilds. Force it with `docker compose build`.
 
-## Pi extensions
+## Docker for e2e tests
 
+The image is based on `debian:bookworm-slim` with our main stack layered
+on top: Node.js from the official tarball (`ARG NODE_VERSION`), plus the
+Docker CLI and the compose plugin as pinned static binaries (`ARG
+DOCKER_VERSION`, `ARG COMPOSE_VERSION`). Bump them with:
+
+```bash
+pi-run upgrade-node       # newest Node v24.x, or: pi-run upgrade-node 24.22.2
+pi-run upgrade-docker     # newest stable CLI, or: pi-run upgrade-docker 29.9.3
+pi-run upgrade-compose    # newest release, or: pi-run upgrade-compose v5.7.0
+```
+
+There is no daemon inside the sandbox: `docker` talks to the **host**
+daemon through `/var/run/docker.sock` (docker-outside-of-docker — a
+privileged DinD daemon would void the hardening above). The socket mount
+is opt-in per machine in `docker-compose.override.yml` (see the
+`.example`), followed by one rebuild with the host's docker GID so the
+`pi` user may use it:
+
+```bash
+DOCKER_GID=$(getent group docker | cut -d: -f3) docker compose build
+```
+
+Two caveats agents must respect (also in `container/AGENTS.md`): socket
+access is host-root-equivalent, and bind mounts in other projects'
+compose files resolve on the host, where `/workspace/...` paths do not
+exist — translate them via `grep workspace /proc/self/mountinfo` first.
+
+## Pi extensions
 Base pi extensions (packages, e.g. subagents) are declared in
 `container/pi-extensions.txt` — one `pi install` source per line:
 
