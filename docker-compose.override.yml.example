@@ -27,6 +27,14 @@ services:
       # Same sources, so no new exposure, just a second view:
       # - /home/you/code:/home/you/code
       # - /home/you/notes:/home/you/notes
+      # Do NOT invent aliases from /proc/self/mountinfo's root field:
+      # it is filesystem-relative, not a host path (e.g. when the source
+      # disk is mounted at /home on the host, the root shows a prefix
+      # that does not exist on the host and the daemon cannot see —
+      # aliasing it only teaches pi-hostpath daemon-invalid paths).
+      # `pi-hostpath` already resolves the daemon-valid form; just keep
+      # its output cd-able by aliasing each real host path (the left side
+      # above) as itself.
       # git-over-ssh (read-only; ssh warns that it cannot update
       # known_hosts — that is intentional):
       # - /home/you/.ssh:/home/pi/.ssh:ro

@@ -213,8 +213,9 @@ daemon would void the hardening below, so it is deliberately not used).
   where `/workspace/...` does not exist. For any docker command that
   creates bind mounts (`compose up/run`, `-v`), `cd` to the REAL host
   path first — every `/workspace/<name>` is also mounted at its real
-  path. Translate with `pi-hostpath <sandbox-path>` (reads the kernel
-  mount table, never guess; it exits 2 outside host mounts):
+  path. Translate with `pi-hostpath <sandbox-path>` (asks the daemon,
+  falling back to the kernel mount table — never guess; it exits 2
+  outside host mounts):
   `cd "$(pi-hostpath /workspace/stack/services/startpage/fe/docker)"`.
   Verify afterwards: `docker inspect <container> --format '{{ .Mounts }}'`
   must show host-valid sources. When in doubt, ask the supervisor for
