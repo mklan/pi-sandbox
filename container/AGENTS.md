@@ -209,11 +209,16 @@ daemon would void the hardening below, so it is deliberately not used).
   GID (`DOCKER_GID=$(getent group docker | cut -d: -f3) docker compose
   build`). If `docker ps` fails with permission denied, the mount or the
   GID is wrong — that is the expected signal, never `chmod` the socket.
-- **Path mapping:** bind mounts in other projects' compose files resolve
-  on the HOST, where `/workspace/...` does not exist. Translate sandbox
-  paths to host paths first — the host source of every mount is visible
-  inside the sandbox via `grep workspace /proc/self/mountinfo`. When in
-  doubt, ask the supervisor for the host path instead of guessing.
+- **Path mapping:** the host daemon resolves bind mounts on the HOST,
+  where `/workspace/...` does not exist. For any docker command that
+  creates bind mounts (`compose up/run`, `-v`), `cd` to the REAL host
+  path first — every `/workspace/<name>` is also mounted at its real
+  path. Translate with `pi-hostpath <sandbox-path>` (reads the kernel
+  mount table, never guess; it exits 2 outside host mounts):
+  `cd "$(pi-hostpath /workspace/stack/services/startpage/fe/docker)"`.
+  Verify afterwards: `docker inspect <container> --format '{{ .Mounts }}'`
+  must show host-valid sources. When in doubt, ask the supervisor for
+  the host path instead of guessing.
 - **Restraint:** the daemon is shared with everything on the host. Name
   test resources per task (`<slug>-...`), always `down -v` when done,
   and never run host-wide commands (`docker system prune`, stopping or

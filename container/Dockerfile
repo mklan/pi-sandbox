@@ -199,6 +199,14 @@ COPY container/pi-worktree.sh /opt/pi-service/pi-worktree.sh
 RUN chmod 0755 /opt/pi-service/pi-worktree.sh \
   && cp /opt/pi-service/pi-worktree.sh /usr/local/bin/pi-worktree
 
+# --- pi-hostpath helper: sandbox path -> host path for docker mounts ----
+# The host daemon resolves bind mounts on the host, where /workspace/...
+# does not exist. Same overlay mechanism as above (see
+# docker-compose.yml); entrypoint reinstalls host edits on every boot.
+COPY container/pi-hostpath.sh /opt/pi-service/pi-hostpath.sh
+RUN chmod 0755 /opt/pi-service/pi-hostpath.sh \
+  && cp /opt/pi-service/pi-hostpath.sh /usr/local/bin/pi-hostpath
+
 # Pre-create the pi home dir so the named volume (see docker-compose.yml)
 # inherits pi:pi ownership instead of root.
 RUN mkdir -p /home/pi/.pi/agent \

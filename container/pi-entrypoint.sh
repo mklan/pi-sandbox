@@ -59,6 +59,13 @@ if [[ -f /opt/pi-service/pi-worktree.sh ]]; then
     && chmod 0755 /usr/local/bin/pi-worktree 2>/dev/null || true
 fi
 
+# pi-hostpath helper (see container/pi-hostpath.sh): same reinstall deal.
+# Never fatal.
+if [[ -f /opt/pi-service/pi-hostpath.sh ]]; then
+  cp /opt/pi-service/pi-hostpath.sh /usr/local/bin/pi-hostpath 2>/dev/null \
+    && chmod 0755 /usr/local/bin/pi-hostpath 2>/dev/null || true
+fi
+
 # Docker socket (opt-in via docker-compose.override.yml): point at the fix
 # when `docker ps` fails, instead of leaving a permission mystery.
 if [[ ! -S /var/run/docker.sock ]]; then

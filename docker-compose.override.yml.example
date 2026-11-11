@@ -19,6 +19,14 @@ services:
       # on the left. Add as many as you like:
       - /home/you/code:/workspace/code
       - /home/you/notes:/workspace/notes
+      # Alias mounts (needed for docker): the host daemon resolves bind
+      # mounts on the HOST, where /workspace/... does not exist. Mounting
+      # each folder a second time at its REAL host path lets agents run
+      # docker compose / -v mounts from a host-valid cwd — translate with
+      # `pi-hostpath <sandbox-path>` inside the sandbox, never guess.
+      # Same sources, so no new exposure, just a second view:
+      # - /home/you/code:/home/you/code
+      # - /home/you/notes:/home/you/notes
       # git-over-ssh (read-only; ssh warns that it cannot update
       # known_hosts — that is intentional):
       # - /home/you/.ssh:/home/pi/.ssh:ro

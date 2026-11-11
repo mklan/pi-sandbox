@@ -455,6 +455,7 @@ image_stamp() {
       "$SERVICE_DIR/container/pi-entrypoint.sh" "$SERVICE_DIR/container/install-herdr.sh" \
       "$SERVICE_DIR/container/pi-extensions.txt" "$SERVICE_DIR/container/pi-extensions-sync.sh" \
       "$SERVICE_DIR/container/pi-wrapper.sh" "$SERVICE_DIR/container/pi-worktree.sh" \
+    "$SERVICE_DIR/container/pi-hostpath.sh" \
       2>/dev/null
     # the host's docker GID is part of the stamp: the pi user is joined
     # to that group at build time, so a GID change must trigger a rebuild

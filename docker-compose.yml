@@ -83,6 +83,8 @@ services:
       # Worktree helper (see container/pi-worktree.sh): same overlay trick —
       # host edits are reinstalled to PATH by the entrypoint on every boot.
       - ./container/pi-worktree.sh:/opt/pi-service/pi-worktree.sh:ro
+      # Host-path helper (see container/pi-hostpath.sh): same overlay trick.
+      - ./container/pi-hostpath.sh:/opt/pi-service/pi-hostpath.sh:ro
       # Docker daemon socket (opt-in): lets agents run `docker ...` /
       # `docker compose ...` for e2e tests against the HOST daemon.
       # Socket access is host-root-equivalent — see README before enabling.

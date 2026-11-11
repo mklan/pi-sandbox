@@ -240,7 +240,8 @@ host's docker GID (it is part of the image stamp, manual fallback:
 Two caveats agents must respect (also in `container/AGENTS.md`): socket
 access is host-root-equivalent, and bind mounts in other projects'
 compose files resolve on the host, where `/workspace/...` paths do not
-exist — translate them via `grep workspace /proc/self/mountinfo` first.
+exist — every mount is therefore aliased at its real host path (see the
+`.example`) and agents translate via `pi-hostpath <sandbox-path>` before running any docker command that creates mounts.
 
 ## Pi extensions
 Base pi extensions (packages, e.g. subagents) are declared in
