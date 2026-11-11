@@ -27,7 +27,7 @@ services:
         USER_UID: ${PUID:-1000}
         USER_GID: ${PGID:-1000}
         # GID of the host's docker group (see the socket mount below).
-        # Rebuild with the real one when it differs:
+        # `pi-run` auto-detects it on rebuild; the manual fallback is:
         #   DOCKER_GID=$(getent group docker | cut -d: -f3) docker compose build
         DOCKER_GID: ${DOCKER_GID:-999}
     image: pi-sandbox
@@ -86,8 +86,8 @@ services:
       # Docker daemon socket (opt-in): lets agents run `docker ...` /
       # `docker compose ...` for e2e tests against the HOST daemon.
       # Socket access is host-root-equivalent — see README before enabling.
-      # After uncommenting, rebuild once so the pi user joins the right
-      # group (see DOCKER_GID above).
+      # After uncommenting, the next `pi-run` rebuilds automatically with
+      # the host's docker GID (folded into the image stamp).
       # - /var/run/docker.sock:/var/run/docker.sock
       # Optional: ssh keys for git-over-ssh (read-only; ssh may warn that it
       # cannot update known_hosts — that is intentional):

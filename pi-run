@@ -450,20 +450,30 @@ new_pi_in_workspace() {
 # the Dockerfile. A stamp label in the image lets us detect that the image
 # no longer matches its sources and rebuild before starting anything.
 image_stamp() {
-  sha256sum "$SERVICE_DIR/container/Dockerfile" "$SERVICE_DIR/container/pi-install.sh" \
-    "$SERVICE_DIR/container/pi-entrypoint.sh" "$SERVICE_DIR/container/install-herdr.sh" \
-    "$SERVICE_DIR/container/pi-extensions.txt" "$SERVICE_DIR/container/pi-extensions-sync.sh" \
-    "$SERVICE_DIR/container/pi-wrapper.sh" "$SERVICE_DIR/container/pi-worktree.sh" \
-    2>/dev/null | sha256sum | cut -c1-16
+  {
+    sha256sum "$SERVICE_DIR/container/Dockerfile" "$SERVICE_DIR/container/pi-install.sh" \
+      "$SERVICE_DIR/container/pi-entrypoint.sh" "$SERVICE_DIR/container/install-herdr.sh" \
+      "$SERVICE_DIR/container/pi-extensions.txt" "$SERVICE_DIR/container/pi-extensions-sync.sh" \
+      "$SERVICE_DIR/container/pi-wrapper.sh" "$SERVICE_DIR/container/pi-worktree.sh" \
+      2>/dev/null
+    # the host's docker GID is part of the stamp: the pi user is joined
+    # to that group at build time, so a GID change must trigger a rebuild
+    # or `docker ps` stays permission-denied
+    getent group docker 2>/dev/null || echo "no-host-docker-group"
+  } | sha256sum | cut -c1-16
 }
 
 ensure_image() {
-  local want have
+  local want have gid
   want="$(image_stamp)"
   have="$(docker image inspect pi-sandbox -f '{{ index .Config.Labels "pi.service.stamp" }}' 2>/dev/null || true)"
   if [[ "$want" != "$have" ]]; then
     echo "pi-sandbox image out of date (Dockerfile/scripts changed) — rebuilding..."
-    (cd "$SERVICE_DIR" && docker compose build --build-arg PI_STAMP="$want")
+    # host's docker GID, so the pi user may use the mounted socket (see
+    # README "Docker for e2e tests"); empty when the host has no docker
+    gid="$(getent group docker 2>/dev/null | cut -d: -f3 || true)"
+    # shellcheck disable=SC2086
+    (cd "$SERVICE_DIR" && docker compose build --build-arg PI_STAMP="$want" ${gid:+--build-arg DOCKER_GID="$gid"})
   fi
 }
 

@@ -233,12 +233,9 @@ There is no daemon inside the sandbox: `docker` talks to the **host**
 daemon through `/var/run/docker.sock` (docker-outside-of-docker — a
 privileged DinD daemon would void the hardening above). The socket mount
 is opt-in per machine in `docker-compose.override.yml` (see the
-`.example`), followed by one rebuild with the host's docker GID so the
-`pi` user may use it:
-
-```bash
-DOCKER_GID=$(getent group docker | cut -d: -f3) docker compose build
-```
+`.example`); the next `pi-run` then rebuilds automatically with the
+host's docker GID (it is part of the image stamp, manual fallback:
+`DOCKER_GID=$(getent group docker | cut -d: -f3) docker compose build`).
 
 Two caveats agents must respect (also in `container/AGENTS.md`): socket
 access is host-root-equivalent, and bind mounts in other projects'
