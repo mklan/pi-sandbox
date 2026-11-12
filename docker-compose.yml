@@ -23,6 +23,12 @@ services:
     build:
       context: .
       dockerfile: container/Dockerfile
+      # Image variant: `default` (base + Node.js + Docker CLI) or `android`
+      # (default + JDK + Android SDK + Gradle + Kotlin). Selected in pi-run
+      # (`pi-run --sandbox android ...`, or PI_SANDBOX=android), which exports
+      # PI_SANDBOX_TARGET/SUFFIX — see the stages in container/Dockerfile.
+      # Plain `docker compose build` without pi-run builds `default`.
+      target: ${PI_SANDBOX_TARGET:-default}
       args:
         USER_UID: ${PUID:-1000}
         USER_GID: ${PGID:-1000}
@@ -30,8 +36,8 @@ services:
         # `pi-run` auto-detects it on rebuild; the manual fallback is:
         #   DOCKER_GID=$(getent group docker | cut -d: -f3) docker compose build
         DOCKER_GID: ${DOCKER_GID:-999}
-    image: pi-sandbox
-    hostname: pi-sandbox
+    image: pi-sandbox${PI_SANDBOX_SUFFIX:-}
+    hostname: pi-sandbox${PI_SANDBOX_SUFFIX:-}
     # Long-running sandbox: the container's main process is `herdr server`
     # (see container/AGENTS.md) — a terminal runtime that keeps every pane,
     # agent and command alive until the container stops. Start it with
@@ -46,6 +52,9 @@ services:
       PI_DEFAULT_PROVIDER: ${PI_DEFAULT_PROVIDER:-}
       PI_DEFAULT_MODEL: ${PI_DEFAULT_MODEL:-}
       PI_DEFAULT_THINKING: ${PI_DEFAULT_THINKING:-}
+      # SSH agent forwarding (pairs with the /ssh-agent mount below;
+      # uncomment together with it):
+      # SSH_AUTH_SOCK: /ssh-agent
     env_file:
       # API keys and similar secrets (git-ignored, chmod 600) — see
       # .env.secrets.example. Optional.
@@ -91,9 +100,16 @@ services:
       # After uncommenting, the next `pi-run` rebuilds automatically with
       # the host's docker GID (folded into the image stamp).
       # - /var/run/docker.sock:/var/run/docker.sock
-      # Optional: ssh keys for git-over-ssh (read-only; ssh may warn that it
-      # cannot update known_hosts — that is intentional):
-      # - /home/you/.ssh:/home/pi/.ssh:ro
+      # Optional: git-over-ssh via the host's ssh-agent (recommended — no
+      # private keys enter the container; the decrypted key stays in the
+      # agent's RAM, unlocked once on the host with `github-ssh-unlock`):
+      # - ${SSH_AUTH_SOCK:-/run/user/1000/ssh-agent.socket}:/ssh-agent
+      # Optional: public host keys so ssh can verify github.com without a
+      # prompt (mount ONLY known_hosts — never the whole ~/.ssh, which
+      # would expose private keys to the agent; do NOT mount ~/.ssh/config
+      # either — its IdentityFile/IdentitiesOnly lines point at key files
+      # that do not exist in the container and would break agent auth):
+      # - /home/you/.ssh/known_hosts:/home/pi/.ssh/known_hosts:ro
     # Writable rootfs + setuid allowed so the agent can install missing
     # packages on the fly via pi-install (the only command the pi user may
     # run as root). The capability set is a minimal subset of Docker's

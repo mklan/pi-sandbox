@@ -184,10 +184,23 @@ like `pi-wrapper.sh`.
   Prefer narrow, short-lived keys. Never mount the host's `~/.pi/agent` —
   that is exactly the credential store this setup keeps out of the
   container.
-- For git over ssh, add a read-only `~/.ssh` mount in
-  `docker-compose.override.yml` (an example line is in the `.example`
-  file). ssh will warn that it cannot update `known_hosts` (the mount is
-  read-only) — that is intentional.
+- For git over ssh, forward the host's ssh-agent instead of mounting
+  keys (example lines are in the `.example` file):
+  ```yaml
+  environment:
+    SSH_AUTH_SOCK: /ssh-agent
+  volumes:
+    - /run/user/1000/ssh-agent.socket:/ssh-agent
+    - /home/you/.ssh/known_hosts:/home/pi/.ssh/known_hosts:ro
+  ```
+  Unlock once on the host with `github-ssh-unlock`, and the container's
+  ssh uses the decrypted key from the agent's RAM — `ssh-add -l` inside
+  must list it. Never mount the whole `~/.ssh` (read-only or not): that
+  exposes private keys to the agent, and the encrypted key file alone is
+  useless inside anyway (hence `Permission denied (publickey)` without
+  the agent socket). Mount only `known_hosts`, and never `~/.ssh/config`
+  — its `IdentityFile`/`IdentitiesOnly` lines point at key files that do
+  not exist in the container and would break agent auth.
 
 ## Self-extending image
 
@@ -216,12 +229,52 @@ image.
 Manual changes work the same way: edit the image sources in `container/`,
 and the next `pi-run` rebuilds. Force it with `docker compose build`.
 
+## Image variants (default / android)
+
+The image is multi-stage (`container/Dockerfile`), based on Ubuntu LTS
+(`ARG UBUNTU_VERSION`, currently 24.04 — universal, and what the Android
+toolchain officially supports):
+
+| Stage / sandbox | Contents | Image |
+|---|---|---|
+| `base` | Ubuntu + general tooling every sandbox needs: git, gh, curl/jq/ripgrep/fd, ssh client, Chrome (browser tests), herdr, pi user, pi-install, entrypoint, helpers | build layer only (never run directly) |
+| `default` | base + Node.js + Docker CLI/compose plugin + pi and vibeflow CLIs + preinstalled pi extensions — the daily driver | `pi-sandbox` |
+| `android` | default + OpenJDK 17 + Android SDK (cmdline-tools, platform-tools, one platform + build-tools, licences pre-accepted) + Gradle + Kotlin — builds Kotlin/Android apps (`gradle assembleDebug`, lint, unit tests) | `pi-sandbox-android` |
+
+Pick the sandbox per invocation, or export it for the whole shell:
+
+```bash
+pi-run ~/code/my-project                  # default sandbox
+pi-run -s android ~/code/android-app      # android sandbox
+pi-run --sandbox android shell ~/code/android-app   # shell there
+PI_SANDBOX=android pi-run ~/code/android-app        # sticky for the shell
+# alternative sticky default for this machine: add PI_SANDBOX=android to .env
+pi-run sandboxes                          # list variants + which is built
+```
+
+Switching variants recreates the container (one `docker compose build` +
+`up` behind the scenes, automatic via the image stamp) — workspaces, panes
+and pi sessions are restored from the `pi-agent-home` volume, so nothing is
+lost. Both variants share the same mounts, `.env.secrets` and
+`docker-compose.override.yml`; no override changes are needed to switch.
+
+Notes for the android sandbox:
+
+- Extend the SDK without root: `/opt/android-sdk` is pi-owned, so
+  `sdkmanager "platforms;android-35"` just works (agents: prefer this over
+  `pi-install` for SDK packages).
+- No emulator system images are baked in (GBs, and they need KVM) — run the
+  emulator on the host and `adb` into it from the sandbox.
+- Keep the toolchain current: `pi-run upgrade-kotlin [version]` and
+  `pi-run upgrade-gradle [version]` pin the versions in the Dockerfile like
+  every other component.
+
 ## Docker for e2e tests
 
-The image is based on `debian:bookworm-slim` with our main stack layered
-on top: Node.js from the official tarball (`ARG NODE_VERSION`), plus the
-Docker CLI and the compose plugin as pinned static binaries (`ARG
-DOCKER_VERSION`, `ARG COMPOSE_VERSION`). Bump them with:
+The `default` stage layers our main stack on top of the base: Node.js from
+the official tarball (`ARG NODE_VERSION`), plus the Docker CLI and the
+compose plugin as pinned static binaries (`ARG DOCKER_VERSION`, `ARG
+COMPOSE_VERSION`). Bump them with:
 
 ```bash
 pi-run upgrade-node       # newest Node v24.x, or: pi-run upgrade-node 24.22.2

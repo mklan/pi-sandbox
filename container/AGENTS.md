@@ -44,7 +44,12 @@ unless the user asks.
 
 The image ships common tooling: git, gh (GitHub CLI), ripgrep (rg), fd,
 curl, jq, less, procps, python3, make, g++, openssh-client, tmux,
-zip/unzip, file. If you
+zip/unzip, file, plus Google Chrome (browser tests). The `default`
+sandbox adds Node.js, the Docker CLI and the pi/vibeflow CLIs; the
+`android` sandbox adds OpenJDK 17, the Android SDK, Gradle and Kotlin —
+see README.md "Image variants". The host picks the sandbox (`pi-run
+-s android ...` / `PI_SANDBOX=android`); you cannot switch it from in
+here. If you
 need anything else:
 
 1. Install it on the fly:
@@ -117,6 +122,14 @@ git is configured system-wide to use gh as its HTTPS credential helper
 over HTTPS work automatically once `gh auth status` shows a login — no
 separate git credentials or SSH keys needed. Creating repos works too:
 `gh repo create ...`.
+
+Git over SSH works too when the host forwards its ssh-agent (the
+`/ssh-agent` mount, see the service README): the container holds no
+private keys, it asks the host's agent. If an SSH remote fails with
+`Permission denied (publickey)` plus `Could not open a connection to your
+authentication agent`, the agent socket is not forwarded or the key is
+still locked — run `github-ssh-unlock` on the host (never copy private
+keys into the container).
 
 ## Committing and pushing (scope)
 
@@ -231,12 +244,14 @@ daemon would void the hardening below, so it is deliberately not used).
 
 - Prefer the preinstalled tools; install only what is genuinely missing.
 - Keep the Dockerfile package list alphabetical, one package per line.
-- pi's own version is pinned in the Dockerfile (`ARG PI_VERSION`), and so
-  is herdr (`ARG HERDR_VERSION`). Do not run `pi update` or `herdr update`
+- Pinned versions live in the Dockerfile (`ARG PI_VERSION`, `ARG
+  HERDR_VERSION`, `ARG NODE_VERSION`, `ARG DOCKER_VERSION`, `ARG
+  COMPOSE_VERSION`, `ARG KOTLIN_VERSION`, `ARG GRADLE_VERSION`, ...). Do
+  not run `pi update` or `herdr update`
   — it would only change this throwaway container. If a version change is
   needed, tell the user to run `pi-run upgrade` or `pi-run
   upgrade-herdr` on the host.
-- `pi-install` accepts plain Debian package names only (no flags, no
+- `pi-install` accepts plain apt package names only (Ubuntu-based image; no flags, no
   paths) — do not try to work around that or to escalate privileges in any
   other way (no editing sudoers, no setuid tricks).
 - You can edit everything under `/workspace`; do not attempt to reach the

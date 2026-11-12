@@ -2,6 +2,12 @@
 # (git-ignored) and adjust — docker compose merges it into
 # docker-compose.yml automatically, so `pi-run` and `docker compose ...`
 # see the merged result without extra flags.
+#
+# Sandbox variant for this machine (`default` or `android`, see README
+# "Image variants"): per invocation via `pi-run -s android ...` or
+# PI_SANDBOX=android; for a sticky machine default, add it to the
+# (git-ignored) .env file next to docker-compose.yml instead:
+#   PI_SANDBOX=android
 
 services:
   pi:
@@ -35,9 +41,12 @@ services:
       # `pi-hostpath` already resolves the daemon-valid form; just keep
       # its output cd-able by aliasing each real host path (the left side
       # above) as itself.
-      # git-over-ssh (read-only; ssh warns that it cannot update
-      # known_hosts — that is intentional):
-      # - /home/you/.ssh:/home/pi/.ssh:ro
+      # git-over-ssh via the host's ssh-agent (no private keys enter the
+      # container; unlock once on the host with `github-ssh-unlock`):
+      # - ${SSH_AUTH_SOCK:-/run/user/1000/ssh-agent.socket}:/ssh-agent
+      # Public host keys so ssh can verify github.com without a prompt
+      # (only known_hosts — never the whole ~/.ssh, never ~/.ssh/config):
+      # - /home/you/.ssh/known_hosts:/home/pi/.ssh/known_hosts:ro
       # Docker daemon socket (opt-in, host-root-equivalent — see README):
       # lets agents run docker / docker compose for e2e tests. After
       # uncommenting, the next `pi-run` rebuilds automatically with the

@@ -2,12 +2,14 @@
 # pi sandbox launcher — one herdr inside the container, one shortcut on
 # the host.
 #
-#   pi-run [-b] [--tab] [path] [pi-args...]
+#   pi-run [-s|--sandbox <name>] [-b] [--tab] [path] [pi-args...]
 #                                       open herdr on the folder's workspace
 #                                       (pi-args always start a FRESH pi
 #                                       session in a new pane (or, with --tab,
 #                                       in a new tab); no args
 #                                       reattaches to the running one)
+#   pi-run sandboxes                list the image variants (default,
+#                                       android) and which one is selected
 #   pi-run ls [-w]                    list workspaces and agents (-w: live)
 #   pi-run log <path|name>            show a workspace's current screen
 #   pi-run shell [path|name] [cmd...] bash in the sandbox at the folder
@@ -18,7 +20,16 @@
 #   pi-run upgrade-node [version]     pin Node.js in the Dockerfile and rebuild
 #   pi-run upgrade-docker [version]   pin the Docker CLI in the Dockerfile and rebuild
 #   pi-run upgrade-compose [version]  pin the compose plugin in the Dockerfile and rebuild
+#   pi-run upgrade-kotlin [version]   pin the Kotlin compiler in the Dockerfile and rebuild
+#   pi-run upgrade-gradle [version]   pin Gradle in the Dockerfile and rebuild
 #   pi-run help                       this text
+#
+# Sandboxes: the image is multi-stage (see container/Dockerfile) — `default`
+# (base Ubuntu + Node.js + Docker CLI) for everyday work, `android` (default
+# + JDK + Android SDK + Gradle + Kotlin) for Kotlin/Android builds. Pick one
+# per invocation (`pi-run -s android ~/code/app`, also `open`/`shell`), or
+# export PI_SANDBOX=android for the whole shell. Switching variants recreates
+# the container (workspaces and pi sessions are restored from the volume).
 #
 # The sandbox container runs herdr (herdr.dev) as its main process. herdr
 # is a terminal workspace manager for coding agents: one workspace per
@@ -67,6 +78,26 @@ slugify() {
 }
 
 hash4() { printf '%s' "$1" | cksum | awk '{ printf "%04x", $1 % 65536 }'; }
+
+# --- sandbox (image variant) selection -----------------------------------
+# The image is multi-stage (see container/Dockerfile): `default` for
+# everyday work, `android` for Kotlin/Android builds. Select per invocation
+# (`pi-run -s android ...`, also after `open`/`shell`) or via PI_SANDBOX.
+# This maps to the compose build target + image suffix (see
+# docker-compose.yml) and to the image name ensure_image checks/builds.
+SANDBOX="${PI_SANDBOX:-default}"
+PI_SANDBOX_TARGET="default"
+PI_SANDBOX_SUFFIX=""
+IMAGE="pi-sandbox"
+
+select_sandbox() {
+  case "$SANDBOX" in
+    default) PI_SANDBOX_TARGET="default"; PI_SANDBOX_SUFFIX=""; IMAGE="pi-sandbox" ;;
+    android) PI_SANDBOX_TARGET="android"; PI_SANDBOX_SUFFIX="-android"; IMAGE="pi-sandbox-android" ;;
+    *) die "unknown sandbox: $SANDBOX (want default|android)" ;;
+  esac
+  export PI_SANDBOX_TARGET PI_SANDBOX_SUFFIX
+}
 
 # --- workspace mounts ----------------------------------------------------
 # The folders the agent may work in are exactly the bind mounts under
@@ -467,9 +498,9 @@ image_stamp() {
 ensure_image() {
   local want have gid
   want="$(image_stamp)"
-  have="$(docker image inspect pi-sandbox -f '{{ index .Config.Labels "pi.service.stamp" }}' 2>/dev/null || true)"
+  have="$(docker image inspect "$IMAGE" -f '{{ index .Config.Labels "pi.service.stamp" }}' 2>/dev/null || true)"
   if [[ "$want" != "$have" ]]; then
-    echo "pi-sandbox image out of date (Dockerfile/scripts changed) — rebuilding..."
+    echo "$IMAGE image out of date (Dockerfile/scripts changed) — rebuilding..."
     # host's docker GID, so the pi user may use the mounted socket (see
     # README "Docker for e2e tests"); empty when the host has no docker
     gid="$(getent group docker 2>/dev/null | cut -d: -f3 || true)"
@@ -499,16 +530,38 @@ jump_to() {
   fi
 }
 
+cmd_sandboxes() {
+  local cur="$SANDBOX" s img mark present desc
+  printf '%-10s %-22s %-9s %s\n' SANDBOX IMAGE BUILT DESCRIPTION
+  for s in default android; do
+    img="pi-sandbox"
+    desc="Ubuntu base + Node.js + Docker CLI (everyday work)"
+    if [[ "$s" == android ]]; then
+      img="pi-sandbox-android"
+      desc="default + JDK + Android SDK + Gradle + Kotlin (Kotlin/Android builds)"
+    fi
+    mark=""; [[ "$s" == "$cur" ]] && mark="*"
+    present="missing"
+    docker image inspect "$img" >/dev/null 2>&1 && present="yes"
+    printf '%-10s %-22s %-9s %s %s\n' "$s" "$img" "$present" "$desc" "$mark"
+  done
+  echo
+  echo "* selected (PI_SANDBOX=$cur). Use: pi-run -s android <path>  (or PI_SANDBOX=android pi-run <path>)"
+}
+
 cmd_open() {
   local bg=0 newtab=0 path fresh=new_pi_in_workspace
   while :; do
     case "${1:-}" in
       -b|--background) bg=1 ;;
       --tab|--new-window) newtab=1 ;;
+      -s|--sandbox) [[ $# -ge 2 ]] || die "missing value for $1 (want default|android)"; SANDBOX="$2"; shift ;;
+      --sandbox=*) SANDBOX="${1#--sandbox=}" ;;
       *) break ;;
     esac
     shift
   done
+  select_sandbox
   if [[ $newtab -eq 1 ]]; then fresh=new_pi_in_new_tab; else fresh=new_pi_in_workspace; fi
   if [[ $# -gt 0 && "$1" != -* ]]; then
     path="$1"
@@ -622,6 +675,14 @@ cmd_log() {
 }
 
 cmd_shell() {
+  while :; do
+    case "${1:-}" in
+      -s|--sandbox) [[ $# -ge 2 ]] || die "missing value for $1 (want default|android)"; SANDBOX="$2"; shift 2 ;;
+      --sandbox=*) SANDBOX="${1#--sandbox=}"; shift ;;
+      *) break ;;
+    esac
+  done
+  select_sandbox
   ensure_stack
   local arg="${1:-}" out wid label abs cdir
   if [[ $# -gt 0 && "$1" != -* ]]; then
@@ -772,6 +833,55 @@ cmd_upgrade_node() {
   echo "done — new sessions run node $ver"
 }
 
+# Same for the Kotlin compiler: pinned via ARG KOTLIN_VERSION (no leading
+# v in the file). Without a version it takes the latest GitHub release.
+cmd_upgrade_kotlin() {
+  local ver="${1:-}" old
+  if [[ -z "$ver" ]]; then
+    if ! ver="$(curl -fsSL --max-time 20 https://api.github.com/repos/JetBrains/kotlin/releases/latest 2>/dev/null \
+        | grep -o '"tag_name": *"v[^"]*"' | head -1 | sed 's/.*"v//; s/"//')"; then
+      die "could not query github for the latest kotlin release"
+    fi
+  fi
+  ver="${ver#v}"
+  [[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+    || die "invalid version: $ver (want X.Y.Z)"
+  old="$(sed -n 's/^ARG KOTLIN_VERSION=//p' "$SERVICE_DIR/container/Dockerfile")"
+  if [[ "$old" == "$ver" ]]; then
+    echo "kotlin already pinned to $ver in Dockerfile"
+  else
+    sed -i "s/^ARG KOTLIN_VERSION=.*/ARG KOTLIN_VERSION=${ver}/" "$SERVICE_DIR/container/Dockerfile"
+    echo "kotlin pinned to $ver in Dockerfile (was ${old:-unset})"
+  fi
+  ensure_image
+  echo "done — new android sessions run kotlinc $ver"
+}
+
+# Same for Gradle: pinned via ARG GRADLE_VERSION (no leading v in the
+# file). Without a version it takes the current release from
+# services.gradle.org.
+cmd_upgrade_gradle() {
+  local ver="${1:-}" old
+  if [[ -z "$ver" ]]; then
+    if ! ver="$(curl -fsSL --max-time 20 https://services.gradle.org/versions/current 2>/dev/null \
+        | grep -o '"version" *: *"[^"]*"' | head -1 | sed 's/.*"//; s/"//')"; then
+      die "could not query services.gradle.org for the latest gradle release"
+    fi
+  fi
+  ver="${ver#v}"
+  [[ "$ver" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] \
+    || die "invalid version: $ver (want X.Y[.Z])"
+  old="$(sed -n 's/^ARG GRADLE_VERSION=//p' "$SERVICE_DIR/container/Dockerfile")"
+  if [[ "$old" == "$ver" ]]; then
+    echo "gradle already pinned to $ver in Dockerfile"
+  else
+    sed -i "s/^ARG GRADLE_VERSION=.*/ARG GRADLE_VERSION=${ver}/" "$SERVICE_DIR/container/Dockerfile"
+    echo "gradle pinned to $ver in Dockerfile (was ${old:-unset})"
+  fi
+  ensure_image
+  echo "done — new android sessions run gradle $ver"
+}
+
 # Same for the Docker CLI: pinned via ARG DOCKER_VERSION. Without a
 # version it takes the newest stable static build from download.docker.com.
 cmd_upgrade_docker() {
@@ -795,8 +905,21 @@ cmd_upgrade_docker() {
   echo "done — new sessions run docker $ver"
 }
 
+# leading sandbox selection (before the subcommand): pi-run -s android ...
+# (only leading flags are consumed here, so prompt text passed to pi can
+# never be mistaken for this flag; `open`/`shell` also accept it later)
+while :; do
+  case "${1:-}" in
+    -s|--sandbox) [[ $# -ge 2 ]] || die "missing value for $1 (want default|android)"; SANDBOX="$2"; shift 2 ;;
+    --sandbox=*) SANDBOX="${1#--sandbox=}"; shift ;;
+    *) break ;;
+  esac
+done
+select_sandbox
+
 case "${1:-}" in
   ""|open) shift 2>/dev/null || true; cmd_open "$@" ;;
+  sandboxes|sandbox|variants) shift 2>/dev/null || true; cmd_sandboxes "$@" ;;
   ls|list|ps) shift; cmd_ls "$@" ;;
   log|peek) shift; cmd_log "$@" ;;
   shell|sh|bash) shift; cmd_shell "$@" ;;
@@ -807,6 +930,8 @@ case "${1:-}" in
   upgrade-node) shift; cmd_upgrade_node "$@" ;;
   upgrade-docker) shift; cmd_upgrade_docker "$@" ;;
   upgrade-compose) shift; cmd_upgrade_compose "$@" ;;
+  upgrade-kotlin) shift; cmd_upgrade_kotlin "$@" ;;
+  upgrade-gradle) shift; cmd_upgrade_gradle "$@" ;;
   help|-h|--help) usage ;;
   *) cmd_open "$@" ;;
 esac

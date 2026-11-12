@@ -1,6 +1,21 @@
-# Pi coding-agent sandbox image.
+# Pi coding-agent sandbox image — multi-stage.
 #
 # Build from the repository root:  docker compose build  (or pi-run)
+#
+# Stages:
+#   base    — Ubuntu LTS + the general tooling every sandbox needs: git,
+#             gh, curl/jq/ripgrep/fd, ssh client, Chrome (browser tests),
+#             herdr, the pi user, pi-install, entrypoint and helpers.
+#   default — base + Node.js + Docker CLI/compose plugin + the pi and
+#             vibeflow CLIs + preinstalled pi extensions. The daily driver.
+#   android — default + OpenJDK + Android SDK + Gradle + Kotlin: builds
+#             Kotlin/Android apps (assembleDebug/lint/test, no emulator
+#             system images — run the emulator on the host).
+#
+# Which sandbox runs is selected in pi-run (`pi-run --sandbox android`
+# or PI_SANDBOX=android), which builds the matching target — see
+# docker-compose.yml. The base stage is a build layer only; no service
+# runs it directly (`docker build --target base` for inspection).
 #
 # pi runs as a non-root user whose uid/gid match the host user (build args
 # USER_UID/USER_GID, default 1000), so files written into the mounted
@@ -8,13 +23,29 @@
 #
 # Self-extending image: inside a session the agent installs missing tools
 # with `pi-install <pkg>` — that installs into the running container and
-# records the package in the apt list below, so it is baked into the image
-# at the next build. The file is mounted into the running container at
-# /opt/pi-service/Dockerfile (see docker-compose.yml); `pi-run` compares
-# the PI_STAMP label against the image sources and rebuilds automatically
-# before starting a new session.
+# records the package in the apt list of the base stage below, so it is
+# baked into the image at the next build. The file is mounted into the
+# running container at /opt/pi-service/Dockerfile (see
+# docker-compose.yml); `pi-run` compares the PI_STAMP label against the
+# image sources and rebuilds automatically before starting a new session.
 
-FROM debian:bookworm-slim
+# --- pinned versions (bump with pi-run upgrade-*) ------------------------
+ARG UBUNTU_VERSION=24.04
+ARG PI_VERSION=1.5.0
+ARG VIBEFLOW_VERSION=0.27.1
+ARG HERDR_VERSION=0.9.5
+ARG NODE_VERSION=24.22.2
+ARG DOCKER_VERSION=29.9.3
+ARG COMPOSE_VERSION=v5.7.0
+ARG DOCKER_GID=999
+ARG KOTLIN_VERSION=2.1.0
+ARG GRADLE_VERSION=8.10.2
+ARG ANDROID_CMDLINE_TOOLS=11076708
+ARG ANDROID_BUILD_TOOLS=34.0.0
+ARG ANDROID_PLATFORM=android-34
+
+# === base: Ubuntu + general sandbox tooling ==============================
+FROM ubuntu:${UBUNTU_VERSION} AS base
 
 # --- apt packages (one per line, keep alphabetical) ----------------------
 # pi-install appends packages on the fly here (directly above the cleanup
@@ -27,6 +58,7 @@ RUN apt-get update \
     fd-find \
     file \
     g++ \
+    gh \
     git \
     jq \
     less \
@@ -40,30 +72,23 @@ RUN apt-get update \
     unzip \
     xz-utils \
     zip \
-    gh \
-    libcups2 \
-    libasound2 \
-    libatspi2.0-0 \
-    libglib2.0-0 \
-    libnss3 \
-    libnspr4 \
-    libdbus-1-3 \
-    libatk1.0-0 \
-    libatk-bridge2.0-0 \
-    libdrm2 \
-    libxkbcommon0 \
-    libxcomposite1 \
-    libxdamage1 \
-    libxfixes3 \
-    libxrandr2 \
-    libgbm1 \
-    libpango-1.0-0 \
-    libcairo2 \
-    chromium \
   && rm -rf /var/lib/apt/lists/*
 
+# --- Google Chrome (browser tests) ---------------------------------------
+# Ubuntu ships no chromium .deb (the `chromium` package is a snap stub,
+# and snapd does not run in this container), so install Chrome stable
+# from Google — apt resolves its library dependencies automatically.
+RUN set -e; \
+  cd /tmp; \
+  curl -fsSLO "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"; \
+  apt-get update; \
+  apt-get install -y --no-install-recommends ./google-chrome-stable_current_amd64.deb; \
+  rm -f google-chrome-stable_current_amd64.deb; \
+  rm -rf /var/lib/apt/lists/*; \
+  google-chrome --version
+
 # --- non-root user matching the host user --------------------------------
-# Created fresh on this base (plain debian ships no node user), so files
+# Created fresh on this base (plain ubuntu ships no node user), so files
 # written into the mounted /workspace folders are owned by you instead
 # of root.
 ARG USER_UID=1000
@@ -82,90 +107,18 @@ RUN set -e; \
     useradd --uid "${USER_UID}" --gid "${USER_GID}" --create-home --shell /bin/bash pi; \
   fi
 
-# --- Node.js (our main stack) from the official tarball ------------------
-# Pinned via NODE_VERSION for reproducible builds; bump with
-# `pi-run upgrade-node`. Installed system-wide so node/npm/npx work for
-# root and pi alike (global npm packages land in /usr/local).
-ARG NODE_VERSION=24.22.2
-RUN set -e; \
-  arch="$(dpkg --print-architecture)"; \
-  case "$arch" in amd64) node_arch=x64 ;; arm64) node_arch=arm64 ;; \
-    *) echo "node: unsupported architecture: $arch" >&2; exit 1 ;; esac; \
-  cd /tmp; \
-  curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.xz"; \
-  curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt"; \
-  grep "node-v${NODE_VERSION}-linux-${node_arch}.tar.xz" SHASUMS256.txt | sha256sum -c -; \
-  tar -xJf "node-v${NODE_VERSION}-linux-${node_arch}.tar.xz" -C /usr/local --strip-components=1; \
-  rm -f "node-v${NODE_VERSION}-linux-${node_arch}.tar.xz" SHASUMS256.txt; \
-  node --version && npm --version
-
-# --- Docker CLI + compose plugin (host daemon via socket) ----------------
-# No dockerd inside: a privileged DinD daemon would void the sandbox
-# hardening (see README.md). Instead the CLI talks to the host daemon
-# through a bind-mounted /var/run/docker.sock (opt-in per machine, see
-# docker-compose.yml) — the devcontainer-standard docker-outside-of-docker
-# setup, enough for agents to build images and run e2e stacks.
-# Pinned like everything else; bump with `pi-run upgrade-docker` /
-# `pi-run upgrade-compose`.
-ARG DOCKER_VERSION=29.9.3
-ARG COMPOSE_VERSION=v5.7.0
-ARG DOCKER_GID=999
-RUN set -e; \
-  arch="$(dpkg --print-architecture)"; \
-  case "$arch" in amd64) docker_arch=x86_64 ;; arm64) docker_arch=aarch64 ;; \
-    *) echo "docker: unsupported architecture: $arch" >&2; exit 1 ;; esac; \
-  cd /tmp; \
-  curl -fsSLO "https://download.docker.com/linux/static/stable/${docker_arch}/docker-${DOCKER_VERSION}.tgz"; \
-  tar -xzf "docker-${DOCKER_VERSION}.tgz" -C /tmp; \
-  mv /tmp/docker/docker /usr/local/bin/docker; \
-  rm -rf "docker-${DOCKER_VERSION}.tgz" /tmp/docker; \
-  mkdir -p /usr/local/lib/docker/cli-plugins; \
-  curl -fsSL "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-linux-${docker_arch}" \
-    -o /usr/local/lib/docker/cli-plugins/docker-compose; \
-  chmod 0755 /usr/local/bin/docker /usr/local/lib/docker/cli-plugins/docker-compose; \
-  docker --version && docker compose version; \
-  if getent group docker >/dev/null; then echo "docker group exists"; \
-  elif getent group "${DOCKER_GID}" >/dev/null; then \
-    echo "ERROR: GID ${DOCKER_GID} is taken by another group — rebuild with --build-arg DOCKER_GID=<host docker gid>" >&2; exit 1; \
-  else groupadd --gid "${DOCKER_GID}" docker; fi; \
-  usermod -aG docker pi
-
-# --- preinstall pi -------------------------------------------------------
-ARG PI_VERSION=1.5.0
-RUN npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@${PI_VERSION}"
-
-# --- preinstall vibeflow CLI (task board CLI used by workspace hooks) --------
-# Provides the `vibeflow` (alias `vf`) command that .vibeflow-commander-hook
-# agent prompts rely on (`vibeflow tasks ...`). Pinned like pi: reinstalling
-# or upgrading inside a session only changes the running container.
-ARG VIBEFLOW_VERSION=0.27.1
-RUN npm install -g "@vibeflow-tools/cli@${VIBEFLOW_VERSION}"
-
 # --- preinstall herdr (terminal runtime for coding agents) ----------------
 # herdr runs every terminal in this container (see container/AGENTS.md) and
 # keeps them alive across SSH disconnects and client restarts. Pinned like
 # pi: `herdr update` inside a session only changes the running container.
 # Installed pi-owned so that update can replace it at runtime.
-ARG HERDR_VERSION=0.9.5
+ARG HERDR_VERSION
 COPY container/install-herdr.sh /usr/local/bin/install-herdr
 RUN chmod 0755 /usr/local/bin/install-herdr \
+  && mkdir -p /home/pi/.local/bin \
   && install-herdr "${HERDR_VERSION}" /home/pi/.local/bin \
   && chown -R pi:pi /home/pi/.local
 ENV PATH="/home/pi/.local/bin:${PATH}"
-
-# --- preinstalled pi extensions (packages) --------------------------------
-# Declared in container/pi-extensions.txt (one `pi install` source per
-# line); installed here so fresh volumes start with them and the npm cache
-# is warm. The entrypoint re-syncs the same list at container boot, so
-# lines added later are picked up on the next start. Pin versions in the
-# list (npm:pkg@x.y.z) for reproducible builds.
-COPY container/pi-extensions.txt /opt/pi-service/pi-extensions.txt
-COPY container/pi-extensions-sync.sh /usr/local/bin/pi-extensions-sync
-RUN chmod 0755 /usr/local/bin/pi-extensions-sync \
-  && chmod 644 /opt/pi-service/pi-extensions.txt
-USER pi
-RUN /usr/local/bin/pi-extensions-sync
-USER root
 
 # --- pi-install helper + the only root path for the pi user --------------
 # The helper validates package names, installs via apt, and records the
@@ -212,6 +165,13 @@ RUN chmod 0755 /opt/pi-service/pi-hostpath.sh \
 RUN mkdir -p /home/pi/.pi/agent \
   && chown -R pi:pi /home/pi/.pi
 
+# Pre-create ~/.ssh pi-owned so bind-mounting known_hosts (a single file,
+# see docker-compose.yml) does not leave a root-owned parent dir behind —
+# ssh refuses to use a ~/.ssh it does not own.
+RUN mkdir -p /home/pi/.ssh \
+  && chown pi:pi /home/pi/.ssh \
+  && chmod 700 /home/pi/.ssh
+
 # --- GitHub CLI: persist the login across container recreations ---------
 # Everything outside /home/pi/.pi/agent is container-local, but gh stores
 # its credentials under ~/.config/gh. Symlink that into the pi-agent-home
@@ -229,7 +189,158 @@ RUN mkdir -p /home/pi/.config \
 # same setup per-user, but ~/.gitconfig itself is container-local.
 RUN git config --system credential.helper '!gh auth git-credential'
 
+# === default: base + Node.js + Docker CLI + pi/vibeflow ==================
+FROM base AS default
+
+# --- Node.js (our main stack) from the official tarball ------------------
+# Pinned via NODE_VERSION for reproducible builds; bump with
+# `pi-run upgrade-node`. Installed system-wide so node/npm/npx work for
+# root and pi alike (global npm packages land in /usr/local).
+ARG NODE_VERSION
+RUN set -e; \
+  arch="$(dpkg --print-architecture)"; \
+  case "$arch" in amd64) node_arch=x64 ;; arm64) node_arch=arm64 ;; \
+    *) echo "node: unsupported architecture: $arch" >&2; exit 1 ;; esac; \
+  cd /tmp; \
+  curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.xz"; \
+  curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt"; \
+  grep "node-v${NODE_VERSION}-linux-${node_arch}.tar.xz" SHASUMS256.txt | sha256sum -c -; \
+  tar -xJf "node-v${NODE_VERSION}-linux-${node_arch}.tar.xz" -C /usr/local --strip-components=1; \
+  rm -f "node-v${NODE_VERSION}-linux-${node_arch}.tar.xz" SHASUMS256.txt; \
+  node --version && npm --version
+
+# --- Docker CLI + compose plugin (host daemon via socket) ----------------
+# No dockerd inside: a privileged DinD daemon would void the sandbox
+# hardening (see README.md). Instead the CLI talks to the host daemon
+# through a bind-mounted /var/run/docker.sock (opt-in per machine, see
+# docker-compose.yml) — the devcontainer-standard docker-outside-of-docker
+# setup, enough for agents to build images and run e2e stacks.
+# Pinned like everything else; bump with `pi-run upgrade-docker` /
+# `pi-run upgrade-compose`.
+ARG DOCKER_VERSION
+ARG COMPOSE_VERSION
+ARG DOCKER_GID
+RUN set -e; \
+  arch="$(dpkg --print-architecture)"; \
+  case "$arch" in amd64) docker_arch=x86_64 ;; arm64) docker_arch=aarch64 ;; \
+    *) echo "docker: unsupported architecture: $arch" >&2; exit 1 ;; esac; \
+  cd /tmp; \
+  curl -fsSLO "https://download.docker.com/linux/static/stable/${docker_arch}/docker-${DOCKER_VERSION}.tgz"; \
+  tar -xzf "docker-${DOCKER_VERSION}.tgz" -C /tmp; \
+  mv /tmp/docker/docker /usr/local/bin/docker; \
+  rm -rf "docker-${DOCKER_VERSION}.tgz" /tmp/docker; \
+  mkdir -p /usr/local/lib/docker/cli-plugins; \
+  curl -fsSL "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-linux-${docker_arch}" \
+    -o /usr/local/lib/docker/cli-plugins/docker-compose; \
+  chmod 0755 /usr/local/bin/docker /usr/local/lib/docker/cli-plugins/docker-compose; \
+  docker --version && docker compose version; \
+  if getent group docker >/dev/null; then echo "docker group exists"; \
+  elif getent group "${DOCKER_GID}" >/dev/null; then \
+    echo "ERROR: GID ${DOCKER_GID} is taken by another group — rebuild with --build-arg DOCKER_GID=<host docker gid>" >&2; exit 1; \
+  else groupadd --gid "${DOCKER_GID}" docker; fi; \
+  usermod -aG docker pi
+
+# --- preinstall pi -------------------------------------------------------
+ARG PI_VERSION
+RUN npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@${PI_VERSION}"
+
+# --- preinstall vibeflow CLI (task board CLI used by workspace hooks) --------
+# Provides the `vibeflow` (alias `vf`) command that .vibeflow-commander-hook
+# agent prompts rely on (`vibeflow tasks ...`). Pinned like pi: reinstalling
+# or upgrading inside a session only changes the running container.
+ARG VIBEFLOW_VERSION
+RUN npm install -g "@vibeflow-tools/cli@${VIBEFLOW_VERSION}"
+
+# --- preinstalled pi extensions (packages) --------------------------------
+# Declared in container/pi-extensions.txt (one `pi install` source per
+# line); installed here so fresh volumes start with them and the npm cache
+# is warm. The entrypoint re-syncs the same list at container boot, so
+# lines added later are picked up on the next start. Pin versions in the
+# list (npm:pkg@x.y.z) for reproducible builds.
+COPY container/pi-extensions.txt /opt/pi-service/pi-extensions.txt
+COPY container/pi-extensions-sync.sh /usr/local/bin/pi-extensions-sync
+RUN chmod 0755 /usr/local/bin/pi-extensions-sync \
+  && chmod 644 /opt/pi-service/pi-extensions.txt
+USER pi
+RUN /usr/local/bin/pi-extensions-sync
+USER root
+
 # --- image stamp (pi-run rebuilds when this no longer matches) -----------
+ARG PI_STAMP=unstamped
+LABEL pi.service.stamp="${PI_STAMP}"
+
+USER pi
+ENV HOME=/home/pi
+WORKDIR /workspace
+
+ENTRYPOINT ["pi-entrypoint"]
+
+# === android: default + JDK + Android SDK + Gradle + Kotlin ==============
+# Builds Kotlin/Android apps: `gradle assembleDebug`, lint and unit tests.
+# Ships the SDK (cmdline-tools, platform-tools, one platform + build-tools)
+# so no large download happens on first use; extend with sdkmanager as pi
+# (the SDK dir is pi-owned). No emulator system images — they are GBs and
+# need KVM; run the emulator on the host and `adb` into it from here.
+FROM default AS android
+USER root
+
+# --- OpenJDK (Gradle and the Android toolchain run on Java) --------------
+# JDK 17: what AGP 8.x + Gradle 8.x require. Bump together with the
+# Gradle/Android pins below.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    openjdk-17-jdk-headless \
+  && rm -rf /var/lib/apt/lists/* \
+  && java -version
+ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+
+# --- Android SDK ----------------------------------------------------------
+# Pinned cmdline-tools; the platform + build-tools come via sdkmanager so
+# the exact revisions stay reproducible. Licences are pre-accepted.
+ARG ANDROID_CMDLINE_TOOLS
+ARG ANDROID_BUILD_TOOLS
+ARG ANDROID_PLATFORM
+ENV ANDROID_HOME=/opt/android-sdk
+ENV ANDROID_SDK_ROOT=/opt/android-sdk
+ENV PATH="/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:${PATH}"
+RUN set -e; \
+  mkdir -p /opt/android-sdk/cmdline-tools; \
+  cd /tmp; \
+  curl -fsSLO "https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_CMDLINE_TOOLS}_latest.zip"; \
+  unzip -q "commandlinetools-linux-${ANDROID_CMDLINE_TOOLS}_latest.zip" -d /opt/android-sdk/cmdline-tools; \
+  mv /opt/android-sdk/cmdline-tools/cmdline-tools /opt/android-sdk/cmdline-tools/latest; \
+  rm -f "commandlinetools-linux-${ANDROID_CMDLINE_TOOLS}_latest.zip"; \
+  yes | sdkmanager --licenses > /dev/null; \
+  sdkmanager "platform-tools" "platforms;${ANDROID_PLATFORM}" "build-tools;${ANDROID_BUILD_TOOLS}"; \
+  sdkmanager --list_installed; \
+  chown -R pi:pi /opt/android-sdk
+
+# --- Gradle (Android builds run through the Gradle wrapper, but a pinned
+# --- system Gradle is handy for inspection and non-wrapper projects) -----
+ARG GRADLE_VERSION
+ENV PATH="/opt/gradle/bin:${PATH}"
+RUN set -e; \
+  cd /tmp; \
+  curl -fsSLO "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip"; \
+  mkdir -p /opt/gradle; \
+  unzip -q "gradle-${GRADLE_VERSION}-bin.zip" -d /tmp; \
+  cp -r "/tmp/gradle-${GRADLE_VERSION}/." /opt/gradle/; \
+  rm -rf "/tmp/gradle-${GRADLE_VERSION}" "gradle-${GRADLE_VERSION}-bin.zip"; \
+  gradle --version
+
+# --- Kotlin compiler ------------------------------------------------------
+ARG KOTLIN_VERSION
+ENV PATH="/opt/kotlin/bin:${PATH}"
+RUN set -e; \
+  cd /tmp; \
+  curl -fsSLO "https://github.com/JetBrains/kotlin/releases/download/v${KOTLIN_VERSION}/kotlin-compiler-${KOTLIN_VERSION}.zip"; \
+  mkdir -p /opt/kotlin; \
+  unzip -q "kotlin-compiler-${KOTLIN_VERSION}.zip" -d /opt/kotlin-tmp; \
+  cp -r /opt/kotlin-tmp/kotlinc/. /opt/kotlin/; \
+  rm -rf /opt/kotlin-tmp "kotlin-compiler-${KOTLIN_VERSION}.zip"; \
+  kotlinc -version
+
+# --- image stamp (same sources as default; per-image label) --------------
 ARG PI_STAMP=unstamped
 LABEL pi.service.stamp="${PI_STAMP}"
 
