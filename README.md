@@ -104,6 +104,7 @@ your uid/gid.
 | `.env.secrets` | provider API keys (git-ignored, chmod 600; see the `.example`) |
 | `container/` | everything that makes up the image: `Dockerfile`, `pi-entrypoint.sh`, `pi-wrapper.sh`, `pi-install.sh`, `install-herdr.sh`, `pi-extensions.txt`, `pi-extensions-sync.sh`, `AGENTS.md` — these run *inside* the container and are no host tools |
 | `README.md` | this file |
+| `WORKTREES.md` | how worktrees/branches work, how tasks land on `main`, how to stay tidy |
 
 ## Hardening
 
@@ -161,15 +162,16 @@ model may belong to another one). Management subcommands (`install`,
 
 Two agents editing the same checkout clobber each other. Inside the
 sandbox, parallel agents in one repo each get their own git worktree on
-their own feature branch via the `pi-worktree` helper (see
-`container/AGENTS.md` "Parallel agents" for the full lifecycle the
-agents follow):
+their own feature branch. The full guide — mental model, who merges when,
+tidiness, troubleshooting — lives in **`WORKTREES.md`** (start there):
 
 ```bash
 pi-run shell ~/code/my-project                  # in the repo root, on main
 pi-worktree create login-form                   # .worktrees/login-form on agent/login-form
 # ... start the agent with its cwd in .worktrees/login-form ...
-pi-worktree finish login-form                   # pushes the branch, removes the worktree
+pi-worktree propose login-form                  # agent: pushes, opens a PR, removes the worktree
+# ... you review the PR, merge it, then ...
+pi-worktree tidy                                # you: drop the merged leftovers (or: land login-form to merge locally)
 ```
 
 `pi-run <folder> "<prompt>"` on an already-open workspace does this
@@ -179,11 +181,13 @@ agents never fork history. The prompt is prefixed with the
 worktree/branch context (including a stale-base warning when the local
 branch trails `origin`).
 
-Removing a worktree never loses committed work (it lives on the branch) —
-review/merge the branch in the main checkout afterwards, then delete it.
+Rule of thumb: agents finish branches, humans land them. Removing a
+worktree never loses committed work (it lives on the branch) — review the
+branch, `land` it, and `tidy` whenever the list looks cluttered.
 The helper ships in the image (`container/pi-worktree.sh`); host edits to
 it are picked up on container restart and baked in at the next rebuild,
-like `pi-wrapper.sh`.
+like `pi-wrapper.sh`. Agents follow the same lifecycle from
+`container/AGENTS.md` "Parallel agents".
 
 ## Credentials & git-over-ssh
 

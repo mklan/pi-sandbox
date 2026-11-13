@@ -163,14 +163,18 @@ cheap (one shared `.git`, no re-clone), fully isolated working tree per
 agent, and the branch keeps the work after the worktree directory is gone.
 
 Use the `pi-worktree` helper (on `PATH` in every session) — do not
-hand-roll `git worktree` commands with ad-hoc paths and branch names:
+hand-roll `git worktree` commands with ad-hoc paths and branch names
+(full guide for humans: `WORKTREES.md` in the service repo):
 
 ```bash
 pi-worktree create <slug> [--base main]   # <root>/.worktrees/<slug> on branch agent/<slug>
 pi-worktree list                           # all worktrees, branches, clean/dirty
 pi-worktree sync                           # fetch origin + ahead/behind per worktree (read-only)
-pi-worktree finish <slug>                  # push branch + remove worktree (end of task)
+pi-worktree propose <slug>                 # push + open a PR with gh + remove worktree (your end-of-task command)
+pi-worktree finish <slug>                  # push + remove worktree WITHOUT a PR (only when gh/origin is missing)
 pi-worktree remove <slug> [--delete-branch]# remove worktree, keep the branch by default
+pi-worktree land <slug>                    # supervisor/human only: merge into main + clean up
+pi-worktree tidy                           # delete merged agent/* leftovers (safe janitor)
 pi-worktree prune                          # drop stale metadata
 ```
 
@@ -192,15 +196,21 @@ pi-worktree prune                          # drop stale metadata
 3. **Set up inside the worktree:** ignored files are NOT copied —
    reinstall deps (`npm ci`, …), copy needed `.env`/local files from the
    root, never commit secrets. Give each agent its own ports/services.
-4. **Finish (agent):** commit on its branch, then `pi-worktree finish
-   <slug>` — pushes (`-u origin`) and removes its own worktree.
-   Report the **branch name** back to the supervisor. Cleanup is
-   automatic at this point: removing a worktree never loses committed
-   work (it lives on the branch); only uncommitted work is at risk, and
-   `finish`/`remove` refuse a dirty tree unless `--force`.
-5. **Merge (supervisor, in the main checkout):** review, `git switch
-   main && git merge --no-ff agent/<slug>`, then `git branch -d
-   agent/<slug>` and `pi-worktree prune`.
+4. **Propose (agent):** commit on its branch, then `pi-worktree propose
+   <slug>` — pushes (`-u origin`), opens a PR against the default
+   branch with `gh`, and removes its own worktree. Report the **PR URL**
+   back to the supervisor. Removing the worktree loses nothing: the local
+   branch, the remote branch and the PR all keep the commits. Only when
+   `gh` or `origin` is unavailable, fall back to `pi-worktree finish
+   <slug>` (push without a PR) and report the **branch name** instead.
+   You never merge — merging is the supervisor's job (PR Merge button
+   or `land`).
+5. **Land (supervisor/human, in the main checkout):** review the PR, then
+   merge it — PR Merge button, or `pi-worktree land <slug>` (local
+   `--no-ff` merge into the default branch, then push `main`; the PR
+   closes itself as merged). Afterwards `git pull` and run `pi-worktree
+   tidy` to drop the local leftovers. Enable *Automatically delete head
+   branches* in the repo settings so merged PRs also vanish on origin.
 
 ### Rules
 
@@ -230,9 +240,9 @@ worktrees with this discipline:
    → commit/stash first; never `reset --hard` a checkout another session
    may be using.
 2. Work on branches, land via merge: parallel work lives on `agent/*`
-   (see above); the supervisor merges into `main`. Never commit parallel
-   work directly to `main`, and never leave `backup-*` lanes lying around
-   — merge or delete them the same day.
+   (see above); the supervisor lands it with `pi-worktree land <slug>`.
+   Never commit parallel work directly to `main`, and never leave
+   `backup-*` lanes lying around — land or delete them the same day.
 3. Push early: `git push -u origin agent/<slug>` (or `pi-worktree finish`)
    so other sessions and the task log see the commits. `pi-run`'s
    auto-isolation warns the agent in its prompt context when its base

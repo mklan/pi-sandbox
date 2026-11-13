@@ -2,9 +2,10 @@
 # pi-worktree — one isolated git worktree per parallel agent.
 #
 # When more than one agent works in the same repo at the same time, every
-# agent gets its own worktree on its own feature branch (see
-# container/AGENTS.md "Parallel agents"). This helper standardizes that
-# lifecycle so worktrees never collide and cleanup is safe:
+# agent gets its own worktree on its own feature branch (see WORKTREES.md,
+# and container/AGENTS.md "Parallel agents" for the agent rules).
+# This helper standardizes that lifecycle so worktrees never collide
+# and cleanup is safe:
 #
 #   pi-worktree create <slug> [--base <branch>]   new worktree + agent/<slug> branch
 #   pi-worktree list                              all worktrees with branch + dirty state
@@ -12,15 +13,23 @@
 #   pi-worktree remove <id> [--delete-branch] [--force]
 #                                                 remove a worktree, keep the branch by default
 #   pi-worktree finish <id> [--no-push] [--keep]  push branch + remove worktree (end of task)
+#   pi-worktree propose <id> [--draft]            push + open a PR with gh + remove worktree (agent end-of-task)
+#   pi-worktree land <id> [--delete-remote]       merge a finished branch into main + clean up
+#   pi-worktree tidy                              drop merged worktrees/branches (safe cleanup)
 #   pi-worktree prune                             drop stale worktree metadata
 #
 # <id> is a slug, a worktree path, or a branch name — whatever is handy.
 #
+# Full human guide: WORKTREES.md in the service repo (mental model, who
+# merges when, how parallel tasks share one workspace).
+#
 # Safety model: removing a worktree never loses COMMITTED work (it lives on
 # the branch); only uncommitted work is at risk. So `remove`/`finish` refuse
 # a dirty worktree unless --force, `remove` keeps the branch unless
-# --delete-branch, and only `finish` (after push) is meant to run
-# unattended at the end of a task.
+# --delete-branch, `land` only merges committed work through the main
+# checkout, and only `finish`/`propose` (after push) are meant to run
+# unattended at the end of a task. `propose` additionally opens a PR, so
+# the work is reviewable on GitHub even after its worktree is gone.
 #
 # Worktrees live at <repo>/.worktrees/<slug> (nested, so they stay inside
 # the sandbox's /workspace mounts — a sibling directory could fall outside
@@ -270,8 +279,102 @@ cmd_finish() {
   else
     do_remove "$root" "$path" 0 0
     printf 'pi-worktree: done — branch %s ready to review\n' "$branch"
-    printf 'merge with: git switch <main> && git merge --no-ff %s && git branch -d %s\n' "$branch" "$branch"
+    printf 'land it with: pi-worktree land %s   (merges into main, deletes the branch)\n' "$branch"
+    printf 'or open a PR first: pi-worktree propose %s\n' "$branch"
   fi
+}
+
+# Push the branch, open a PR with gh, and remove the worktree.
+# This is the agent's end-of-task command: the work becomes reviewable on
+# GitHub (nothing gets lost — the PR holds the commits) and the checkout is
+# freed. Removing the worktree is safe: the local branch, the remote branch
+# and the PR all keep the commits. Run from anywhere in the repo. Merging
+# the PR is the supervisor's job (Merge button, or `pi-worktree land`);
+# after the merge, `tidy` drops the local leftovers.
+cmd_propose() {
+  local id="" draft=0 root path="" branch="" def="" workdir="" pr_url="" args=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --draft) draft=1; shift ;;
+      -*) die "unknown flag: $1" ;;
+      *) [[ -z "$id" ]] || die "one branch at a time"; id="$1"; shift ;;
+    esac
+  done
+  [[ -n "$id" ]] || die "usage: pi-worktree propose <slug|path|branch> [--draft]"
+  command -v gh >/dev/null 2>&1 \
+    || die "gh not found — cannot open a PR (use pi-worktree finish instead)"
+  gh auth status >/dev/null 2>&1 \
+    || die "gh is not logged in — run: gh auth login (or use pi-worktree finish instead)"
+  root="$(repo_root)"
+  git -C "$root" remote get-url origin >/dev/null 2>&1 \
+    || die "no origin remote — cannot open a PR (use pi-worktree finish --no-push instead)"
+  # Worktree may already be gone (finished earlier) — the branch alone is
+  # enough to propose from.
+  # NOTE: the `if` must wrap the substitution (not `|| true` inside it):
+  # a dying helper inside $(...) would take the whole shell down under
+  # `set -e`, even with `|| true` in the subshell.
+  if path="$(resolve_worktree "$root" "$id" 2>/dev/null)"; then
+    branch="$(branch_of "$root" "$path")"
+  else
+    path=""
+  fi
+  if [[ -z "${branch:-}" || "$branch" == detached || "$branch" == bare ]]; then
+    branch=""
+    if git -C "$root" show-ref --verify --quiet "refs/heads/$id" 2>/dev/null; then
+      branch="$id"
+    elif git -C "$root" show-ref --verify --quiet "refs/heads/agent/$id" 2>/dev/null; then
+      branch="agent/$id"
+    else
+      die "no worktree or branch '$id' — see: pi-worktree list"
+    fi
+    if ! path="$(resolve_worktree "$root" "$branch" 2>/dev/null)"; then
+      path=""
+    fi
+  fi
+  case "$branch" in
+    main|master) die "refusing to propose $branch — agent work lives on agent/* branches" ;;
+    ""|detached|bare) die "worktree has no branch — nothing to propose" ;;
+  esac
+  if [[ -n "$path" ]]; then
+    ensure_not_main "$root" "$path"
+    [[ -z "$(git -C "$path" ls-files -u)" ]] \
+      || die "unmerged paths in $path — resolve conflicts first"
+    [[ -z "$(git -C "$path" status --porcelain=v1)" ]] \
+      || die "worktree is dirty — commit inside $path first (then re-run propose)"
+    workdir="$path"
+  else
+    workdir="$root"
+  fi
+  def="$(default_branch "$root")"
+  [[ -n "$def" ]] || die "cannot determine the default branch (no main/master?)"
+  # Push first, so the PR has content (re-running updates an open PR).
+  if [[ -n "$path" ]]; then
+    git -C "$path" push -u origin "$branch" \
+      || die "push failed — fix and re-run propose"
+  else
+    git -C "$root" push origin "$branch" \
+      || die "push failed — fix and re-run propose"
+  fi
+  # gh resolves the repo from the cwd — run it inside the worktree (or root).
+  if pr_url="$(cd "$workdir" && gh pr view "$branch" --json url --jq .url 2>/dev/null)" \
+     && [[ -n "$pr_url" ]]; then
+    printf 'pi-worktree: PR already open: %s\n' "$pr_url" >&2
+  else
+    args=(pr create --base "$def" --head "$branch" --fill)
+    [[ "$draft" == 1 ]] && args+=(--draft)
+    if ! pr_url="$(cd "$workdir" && gh "${args[@]}" 2>/tmp/pi-pr-err)"; then
+      cat /tmp/pi-pr-err >&2 || true
+      rm -f /tmp/pi-pr-err
+      die "gh pr create failed (branch is pushed) — resolve and re-run propose"
+    fi
+    rm -f /tmp/pi-pr-err
+    printf 'pi-worktree: opened %s\n' "$pr_url" >&2
+  fi
+  if [[ -n "$path" ]]; then
+    do_remove "$root" "$path" 0 0
+  fi
+  printf 'pi-worktree: proposed %s -> %s\n' "$branch" "$pr_url"
+  printf 'pi-worktree: next: review the PR, merge it, then run: git pull && pi-worktree tidy\n'
 }
 
 cmd_prune() {
@@ -318,12 +421,196 @@ cmd_sync() {
   done < <(worktree_table "$root")
 }
 
+# default integration branch: origin/HEAD if set, else local main/master,
+# else whatever the main worktree is on. Centralizes the "<main>" choice
+# so finish/land/tidy agree (previously finish printed a literal <main>).
+default_branch() {
+  local root="$1" ref sym
+  if git -C "$root" rev-parse --verify --quiet "refs/remotes/origin/HEAD" >/dev/null 2>&1; then
+    sym="$(git -C "$root" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null || true)"
+    ref="${sym#refs/remotes/origin/}"
+    if [[ -n "$ref" && "$ref" != "$sym" ]]; then printf '%s' "$ref"; return 0; fi
+  fi
+  if git -C "$root" show-ref --verify --quiet "refs/heads/main" 2>/dev/null; then
+    printf 'main'; return 0
+  fi
+  if git -C "$root" show-ref --verify --quiet "refs/heads/master" 2>/dev/null; then
+    printf 'master'; return 0
+  fi
+  git -C "$(main_worktree "$root")" branch --show-current 2>/dev/null || true
+}
+
+# Merge a finished agent branch into the default branch and clean up.
+# Runs in the MAIN checkout (never inside a worker worktree): switches the
+# main worktree to <default>, fast-forwards it when possible, merges with
+# --no-ff, deletes the local branch, removes the worktree if it still
+# exists, and prunes. Uncommitted work anywhere blocks the merge.
+cmd_land() {
+  local id="" del_remote=0 root path="" branch="" main_wt="" def=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --delete-remote|-r) del_remote=1; shift ;;
+      -*) die "unknown flag: $1" ;;
+      *) [[ -z "$id" ]] || die "one branch at a time"; id="$1"; shift ;;
+    esac
+  done
+  [[ -n "$id" ]] || die "usage: pi-worktree land <slug|path|branch> [--delete-remote]"
+  root="$(repo_root)"
+  # Worktree may already be gone (finished earlier) — resolve either way.
+  # NOTE: the `if` must wrap the substitution (not `|| true` inside it):
+  # a dying helper inside $(...) would take the whole shell down under
+  # `set -e`, even with `|| true` in the subshell.
+  if path="$(resolve_worktree "$root" "$id" 2>/dev/null)"; then
+    branch="$(branch_of "$root" "$path")"
+  else
+    path=""
+  fi
+  if [[ -z "${branch:-}" || "$branch" == detached || "$branch" == bare || -z "$branch" ]]; then
+    branch=""
+    if git -C "$root" show-ref --verify --quiet "refs/heads/$id" 2>/dev/null; then
+      branch="$id"
+    elif git -C "$root" show-ref --verify --quiet "refs/heads/agent/$id" 2>/dev/null; then
+      branch="agent/$id"
+    else
+      die "no worktree or branch '$id' — see: pi-worktree list"
+    fi
+    if ! path="$(resolve_worktree "$root" "$branch" 2>/dev/null)"; then
+      path=""
+    fi
+  fi
+  case "$branch" in
+    main|master) die "refusing to land $branch onto itself — land agent/* branches only" ;;
+    ""|detached|bare) die "worktree has no branch — nothing to land" ;;
+  esac
+  git -C "$root" show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null \
+    || die "branch $branch does not exist locally"
+  main_wt="$(main_worktree "$root")"
+  def="$(default_branch "$root")"
+  [[ -n "$def" ]] || die "cannot determine the default branch (no main/master?)"
+  [[ -z "$(git -C "$main_wt" status --porcelain=v1 2>/dev/null)" ]] \
+    || die "main checkout $main_wt is dirty — commit/stash there first"
+  if [[ -n "$path" && "$path" != "$main_wt" ]]; then
+    [[ -z "$(git -C "$path" status --porcelain=v1 2>/dev/null)" ]] \
+      || die "worktree $path is dirty — commit inside it first (then re-run land)"
+    [[ -z "$(git -C "$path" ls-files -u)" ]] \
+      || die "unmerged paths in $path — resolve conflicts first"
+  fi
+  git -C "$root" fetch origin --quiet 2>/dev/null || true
+  git -C "$main_wt" switch "$def" --quiet 2>/dev/null \
+    || git -C "$main_wt" checkout "$def" --quiet 2>/dev/null \
+    || die "cannot switch the main checkout to $def"
+  # Fast-forward main when it only trails its upstream — keeps the merge
+  # base fresh without ever merging into main from here.
+  if git -C "$main_wt" rev-parse --verify --quiet "@{u}" >/dev/null 2>&1; then
+    git -C "$main_wt" pull --ff-only --quiet 2>/dev/null \
+      || printf 'pi-worktree: note: could not fast-forward %s (diverged?) — merging anyway\n' "$def" >&2
+  fi
+  git -C "$main_wt" merge --no-ff -m "Merge branch '$branch'" "$branch" \
+    || die "merge conflicts — resolve them in $main_wt, commit, then clean up with: pi-worktree remove $branch --delete-branch"
+  if [[ -n "$path" && "$path" != "$main_wt" ]]; then
+    do_remove "$root" "$path" 1 0
+  else
+    git -C "$root" branch -d "$branch" \
+      || die "merged but could not delete branch $branch — remove it manually"
+  fi
+  if [[ "$del_remote" == 1 ]]; then
+    if git -C "$root" remote get-url origin >/dev/null 2>&1; then
+      git -C "$root" push origin --delete "$branch" 2>/dev/null \
+        || printf 'pi-worktree: note: merged locally but remote delete failed\n' >&2
+    fi
+  fi
+  git -C "$root" worktree prune
+  printf 'pi-worktree: landed %s into %s\n' "$branch" "$def"
+}
+
+# Merged into the default branch — locally, or into its origin copy (a PR
+# merged on GitHub lands there before you pull). The ancestor checks are
+# the safety case for the -D deletes in tidy: every erased commit stays
+# reachable from the default branch.
+is_merged() {
+  local root="$1" b="$2" def="$3"
+  git -C "$root" merge-base --is-ancestor "$b" "$def" 2>/dev/null && return 0
+  git -C "$root" rev-parse --verify --quiet "refs/remotes/origin/$def" >/dev/null 2>&1 \
+    && git -C "$root" merge-base --is-ancestor "$b" "origin/$def" 2>/dev/null
+}
+
+# Safe janitor: prune stale metadata, fetch --prune, drop worktrees whose
+# branch is already merged (e.g. after its PR was merged), and delete local
+# agent/* branches merged into the default branch. Never deletes unmerged
+# work, never touches dirty worktrees, never deletes remotes. Run whenever
+# `list` looks cluttered — typically right after pulling merged PRs.
+cmd_tidy() {
+  local root main_wt def b p merged=0 kept=0 freed=0 behind
+  root="$(repo_root)"
+  git -C "$root" worktree prune
+  git -C "$root" worktree repair 2>/dev/null || true
+  git -C "$root" fetch origin --prune --quiet 2>/dev/null || true
+  main_wt="$(main_worktree "$root")"
+  def="$(default_branch "$root")"
+  [[ -n "$def" ]] || die "cannot determine the default branch (no main/master?)"
+  # 1. Worktrees on merged branches are dead weight (the PR is merged, the
+  #    commits are safe) — remove the checkout when clean. Branch deletion
+  #    happens in step 2. A merged PR does NOT do this for you: GitHub
+  #    cannot reach your machine; tidy is the step that reaps it locally.
+  while IFS=$'\t' read -r p b; do
+    [[ -n "$p" && -n "$b" ]] || continue
+    [[ "$p" == "$main_wt" ]] && continue
+    case "$b" in agent/*) ;; *) continue ;; esac
+    if is_merged "$root" "$b" "$def"; then
+      if [[ -n "$(git -C "$p" status --porcelain=v1 2>/dev/null)" ]]; then
+        printf 'pi-worktree: tidy: keeping worktree %s — dirty despite merged branch (commit/stash, then re-run)\n' "$p" >&2
+        kept=$((kept + 1))
+      elif git -C "$root" worktree remove "$p" 2>/dev/null; then
+        printf 'pi-worktree: tidy: removed merged worktree %s\n' "$p" >&2
+        freed=$((freed + 1))
+      else
+        printf 'pi-worktree: tidy: keeping worktree %s (remove failed)\n' "$p" >&2
+        kept=$((kept + 1))
+      fi
+    fi
+  done < <(worktree_table "$root")
+  git -C "$root" worktree prune
+  # 2. Local agent/* branches merged into the default branch: safe to
+  #    delete (is_merged above is the guarantee, so -D is exact here).
+  while IFS= read -r b; do
+    [[ -n "$b" ]] || continue
+    case "$b" in agent/*) ;; *) continue ;; esac
+    if is_merged "$root" "$b" "$def"; then
+      if worktree_table "$root" | cut -f2 | grep -qx "$b"; then
+        printf 'pi-worktree: tidy: keeping %s (still checked out)\n' "$b" >&2
+        kept=$((kept + 1))
+      elif git -C "$root" branch -D "$b" >/dev/null 2>&1; then
+        printf 'pi-worktree: tidy: deleted merged branch %s\n' "$b" >&2
+        merged=$((merged + 1))
+      else
+        printf 'pi-worktree: tidy: keeping %s (delete failed)\n' "$b" >&2
+        kept=$((kept + 1))
+      fi
+    else
+      kept=$((kept + 1))
+    fi
+  done < <(git -C "$root" for-each-ref --format='%(refname:short)' refs/heads/agent/)
+  git -C "$root" worktree prune
+  # 3. Merged-on-GitHub lanes only become visible to steps 1-2 after a pull.
+  if git -C "$root" rev-parse --verify --quiet "refs/remotes/origin/$def" >/dev/null 2>&1; then
+    behind="$(git -C "$root" rev-list --count "$def..origin/$def" 2>/dev/null || echo 0)"
+    if [[ "$behind" != "0" ]]; then
+      printf 'pi-worktree: note: local %s is %s behind origin/%s — pull, then re-run tidy to catch newly merged lanes\n' "$def" "$behind" "$def" >&2
+    fi
+  fi
+  printf 'pi-worktree: tidy done — removed %d worktree(s), deleted %d merged branch(es), %d agent branch(es) still open\n' "$freed" "$merged" "$kept" >&2
+  cmd_list
+}
+
 case "${1:-}" in
   create) shift; cmd_create "$@" ;;
   list|ls) shift; cmd_list "$@" ;;
-  sync) shift; cmd_sync "$@" ;;
+  sync|status) shift; cmd_sync "$@" ;;
   remove|rm) shift; cmd_remove "$@" ;;
   finish|done) shift; cmd_finish "$@" ;;
+  propose|pr) shift; cmd_propose "$@" ;;
+  land|merge) shift; cmd_land "$@" ;;
+  tidy|clean) shift; cmd_tidy "$@" ;;
   prune) shift; cmd_prune "$@" ;;
   -h|--help|help|"") usage ;;
   *) die "unknown command '$1' — see: pi-worktree --help" ;;

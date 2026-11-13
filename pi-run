@@ -683,7 +683,7 @@ maybe_isolate_worktree() {
     fi
   fi
   printf 'pi-run: isolated parallel session in worktree %s (branch %s, base %s)\n' "$path" "$branch" "$base" >&2
-  printf '%s\t%s\t%s' "$path" "$branch" "[pi-run: you are in worktree $path on branch $branch (base $base). Stay in this directory for the whole task; set up deps as needed (node_modules/.env are not copied). Commit on this branch and finish with pi-worktree finish ${branch#agent/} (pushes the branch for review). Do not commit to $base from here.$note]"
+  printf '%s\t%s\t%s' "$path" "$branch" "[pi-run: you are in worktree $path on branch $branch (base $base). Stay in this directory for the whole task; set up deps as needed (node_modules/.env are not copied). Commit on this branch and open a PR with pi-worktree propose ${branch#agent/} (pushes, opens a PR with gh, removes the worktree; the branches and PR stay for a human to merge — if gh/origin is unavailable, use pi-worktree finish instead). Do not commit to $base from here, never merge into it yourself and never merge the PR.$note]"
 }
 new_pi_in_new_tab() {
   local wid="$1" cdir="$2" abs="$3"; shift 3
