@@ -15,6 +15,29 @@ set -euo pipefail
 # Dockerfile) so the gh login persists — make sure the target exists.
 mkdir -p /home/pi/.pi/agent/gh
 
+# GitHub CLI auth: if GH_TOKEN/GITHUB_TOKEN is provided via .env.secrets
+# (see docker-compose.yml env_file) and gh is not logged in, log in
+# non-interactively with git-over-SSH (mirrors the host) so `gh` + git use
+# the forwarded ssh-agent — no private keys live in the container.
+# hosts.yml lives in the pi-agent-home volume (symlink, see Dockerfile),
+# so this persists across recreations; on later boots the status check
+# passes and nothing changes.
+if ! gh auth status >/dev/null 2>&1; then
+  _gh_token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+  if [[ -n "$_gh_token" ]]; then
+    # NB: clear GH_TOKEN/GITHUB_TOKEN for the login itself — gh refuses
+    # to store credentials while they are set (it would auth from env
+    # instead of hosts.yml, defaulting to https). Token survives in the
+    # shell var; hosts.yml becomes authoritative with ssh protocol.
+    if printf '%s' "$_gh_token" | env -u GH_TOKEN -u GITHUB_TOKEN gh auth login --git-protocol ssh --with-token >/dev/null 2>&1; then
+      echo "pi-entrypoint: gh authenticated from env token (ssh)" >&2
+    else
+      echo "pi-entrypoint: warning: gh auth login from env token failed" >&2
+    fi
+  fi
+  unset _gh_token
+fi
+
 # herdr's state (config, workspace layout, session snapshots, logs,
 # sockets) lives in the volume too (same symlink trick), so workspaces and
 # agents come back after the container is recreated. Stale sockets from a
