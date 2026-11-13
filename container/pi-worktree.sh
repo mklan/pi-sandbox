@@ -8,6 +8,7 @@
 #
 #   pi-worktree create <slug> [--base <branch>]   new worktree + agent/<slug> branch
 #   pi-worktree list                              all worktrees with branch + dirty state
+#   pi-worktree sync                              fetch origin + ahead/behind per worktree (read-only)
 #   pi-worktree remove <id> [--delete-branch] [--force]
 #                                                 remove a worktree, keep the branch by default
 #   pi-worktree finish <id> [--no-push] [--keep]  push branch + remove worktree (end of task)
@@ -281,9 +282,46 @@ cmd_prune() {
   cmd_list
 }
 
+# read-only divergence overview: fetch origin, then show every worktree's
+# branch ahead/behind its upstream (or the same-named origin branch).
+# Supervisors run this before merging to see which lanes are stale.
+cmd_sync() {
+  local root p b head dirty upstream ab behind ahead counts
+  root="$(repo_root)"
+  if git -C "$root" remote get-url origin >/dev/null 2>&1; then
+    git -C "$root" fetch origin --quiet 2>/dev/null \
+      || printf 'pi-worktree: note: fetch origin failed (offline?) — showing last-known refs\n' >&2
+  else
+    printf 'pi-worktree: note: no origin remote — comparing against local refs only\n' >&2
+  fi
+  printf '%-44s %-24s %-11s %-11s %s\n' WORKTREE BRANCH VS-UPSTREAM STATE HEAD
+  while IFS=$'\t' read -r p b; do
+    [[ -z "$p" ]] && continue
+    head="$(git -C "$p" rev-parse --short HEAD 2>/dev/null || echo '?')"
+    dirty="clean"
+    [[ -n "$(git -C "$p" status --porcelain=v1 2>/dev/null)" ]] && dirty="dirty"
+    [[ "$p" == "$(main_worktree "$root")" ]] && dirty="$dirty,main"
+    upstream="$(git -C "$p" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)"
+    if [[ -z "$upstream" && -n "$b" && "$b" != detached && "$b" != bare ]] \
+       && git -C "$root" rev-parse --verify --quiet "refs/remotes/origin/$b" >/dev/null 2>&1; then
+      upstream="origin/$b"
+    fi
+    ab="-"
+    if [[ -n "$upstream" ]]; then
+      counts="$(git -C "$p" rev-list --left-right --count "$upstream...HEAD" 2>/dev/null || true)"
+      if [[ -n "$counts" ]]; then
+        IFS=$'\t' read -r behind ahead <<<"$counts"
+        ab="+$ahead/-$behind"
+      fi
+    fi
+    printf '%-44s %-24s %-11s %-11s %s\n' "$p" "${b:-?}" "$ab" "$dirty" "$head"
+  done < <(worktree_table "$root")
+}
+
 case "${1:-}" in
   create) shift; cmd_create "$@" ;;
   list|ls) shift; cmd_list "$@" ;;
+  sync) shift; cmd_sync "$@" ;;
   remove|rm) shift; cmd_remove "$@" ;;
   finish|done) shift; cmd_finish "$@" ;;
   prune) shift; cmd_prune "$@" ;;

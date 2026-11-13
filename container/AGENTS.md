@@ -168,10 +168,16 @@ hand-roll `git worktree` commands with ad-hoc paths and branch names:
 ```bash
 pi-worktree create <slug> [--base main]   # <root>/.worktrees/<slug> on branch agent/<slug>
 pi-worktree list                           # all worktrees, branches, clean/dirty
+pi-worktree sync                           # fetch origin + ahead/behind per worktree (read-only)
 pi-worktree finish <slug>                  # push branch + remove worktree (end of task)
 pi-worktree remove <slug> [--delete-branch]# remove worktree, keep the branch by default
 pi-worktree prune                          # drop stale metadata
 ```
+
+> `pi-run <folder> "<prompt>"` on an already-open workspace isolates
+> the fresh session automatically (own worktree + branch, prompt prefixed
+> with the worktree context). The lifecycle below is for manual setups
+> (herdr agents, subagents) — same rules apply to the auto-created ones.
 
 ### Lifecycle
 
@@ -210,6 +216,29 @@ pi-worktree prune                          # drop stale metadata
   conflicts are that agent's job, resolved on its branch.
 - Non-git folders cannot use worktrees — copy the folder (`cp -a`, one
   copy per agent) instead.
+
+### Git sync (avoid branch divergence)
+
+Worktrees isolate files, not history. Parallel sessions once produced two
+never-merged lanes off the same merge-base: agents committed on `main`
+without pushing, and a later `pull` forked history — one lane's fix never
+reached the tested checkout while its task claimed it was done. Pair
+worktrees with this discipline:
+
+1. Before starting: `git fetch origin`, then `git status -sb` for
+   ahead/behind. Behind and clean → `git pull --rebase`. Behind and dirty
+   → commit/stash first; never `reset --hard` a checkout another session
+   may be using.
+2. Work on branches, land via merge: parallel work lives on `agent/*`
+   (see above); the supervisor merges into `main`. Never commit parallel
+   work directly to `main`, and never leave `backup-*` lanes lying around
+   — merge or delete them the same day.
+3. Push early: `git push -u origin agent/<slug>` (or `pi-worktree finish`)
+   so other sessions and the task log see the commits. `pi-run`'s
+   auto-isolation warns the agent in its prompt context when its base
+   trails `origin`.
+4. Visibility: `pi-worktree sync` (fetch + ahead/behind per worktree)
+   shows at a glance which lanes still need merging.
 
 ## Docker for e2e tests (host daemon)
 

@@ -172,6 +172,13 @@ pi-worktree create login-form                   # .worktrees/login-form on agent
 pi-worktree finish login-form                   # pushes the branch, removes the worktree
 ```
 
+`pi-run <folder> "<prompt>"` on an already-open workspace does this
+isolation automatically: the fresh session starts in a new
+`agent/<slug>` worktree instead of the shared checkout, so parallel
+agents never fork history. The prompt is prefixed with the
+worktree/branch context (including a stale-base warning when the local
+branch trails `origin`).
+
 Removing a worktree never loses committed work (it lives on the branch) —
 review/merge the branch in the main checkout afterwards, then delete it.
 The helper ships in the image (`container/pi-worktree.sh`); host edits to

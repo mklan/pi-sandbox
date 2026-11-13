@@ -53,7 +53,10 @@
 # before); everything that runs there keeps running until you close it.
 # With no extra args an existing workspace is just focused. With extra
 # args (a prompt and/or pi flags) a fresh pi session is always started in
-# a new pane of that workspace, leaving the old session running.
+# a new pane of that workspace, leaving the old session running. When the
+# folder is inside a git repo, that fresh session is isolated in its own
+# worktree on its own branch (agent/<slug>) — see maybe_isolate_worktree —
+# so parallel agents never share one checkout and fork history.
 #
 # Inside the TUI: detach with ctrl+b q — panes and agents keep working.
 # Re-attach by running this script again (any folder, or none for the
@@ -184,6 +187,16 @@ maybe_apply_workspace_sandbox() {
     echo "using $SANDBOX sandbox (from $cfg)"
   fi
   return 0
+}
+
+# explicit sandbox choice: -s/--sandbox flag or PI_SANDBOX env. A workspace
+# `.pi-sandbox` file or the built-in default is implicit: opening such a
+# workspace must never downgrade a running android container (android is
+# a superset of default, so default workspaces run fine there), otherwise
+# a bare `pi-run` from a default project would kill android workspaces.
+# Downgrades happen only on explicit request (`pi-run -s default ...`).
+sandbox_is_explicit() {
+  [[ $SANDBOX_FROM_CLI -eq 1 ]] || [[ -n "${PI_SANDBOX:-}" ]]
 }
 
 # --- workspace mounts ----------------------------------------------------
@@ -370,31 +383,64 @@ require_stack() {
 # start (or resume) the container and wait until herdr accepts commands
 ensure_stack() {
   ensure_image
-  local need_up=0 reason=""
+  local need_up=0 reason="" switching=0
   if ! find_ctr || ! docker exec "$CTR" herdr status server >/dev/null 2>&1; then
     need_up=1
     reason="starting the sandbox container (herdr keeps everything running)..."
   else
-    # one container serves one variant: recreate when the running image
-    # is not the selected sandbox (e.g. a workspace `.pi-sandbox` file
-    # points elsewhere). Workspaces and pi sessions restore from the volume.
-    local cur_img
+    # one container serves one variant. Workspaces and pi sessions
+    # restore from the volume on recreate.
+    local cur_img cur_base
     cur_img="$(docker inspect "$CTR" --format '{{.Config.Image}}' 2>/dev/null || true)"
-    if [[ -n "$cur_img" && "$cur_img" != "$IMAGE" ]]; then
-      need_up=1
-      reason="switching sandbox to $SANDBOX (was $cur_img) -- recreating the container (workspaces restore from the volume)..."
+    cur_base="${cur_img%%:*}" # strip any :tag compose may report
+    if [[ -n "$cur_base" && "$cur_base" != "$IMAGE" ]]; then
+      if [[ "$IMAGE" == *-android ]]; then
+        # android required (workspace file / flag / env): upgrade even
+        # when the request was implicit — default cannot run android work.
+        need_up=1
+        switching=1
+        reason="switching sandbox to $SANDBOX (was $cur_img) -- recreating the container (workspaces restore from the volume)..."
+      elif sandbox_is_explicit; then
+        # explicit downgrade (`-s default` / PI_SANDBOX=default): honor it.
+        need_up=1
+        switching=1
+        reason="switching sandbox to $SANDBOX (was $cur_img) -- recreating the container (workspaces restore from the volume)..."
+      else
+        # implicit default (bare `pi-run`, no workspace file): keep the
+        # running android container — default workspaces run fine there
+        # and a downgrade would disrupt android workspaces.
+        SANDBOX="android"
+        select_sandbox
+        echo "keeping android sandbox (running) for a default workspace — android runs everything default can (use -s default to force a downgrade)" >&2
+      fi
     fi
   fi
   if [[ $need_up -eq 1 ]]; then
     echo "$reason"
+    local old_ctr="${CTR:-}"
     compose up -d >/dev/null || die "cannot start the sandbox container"
     CTR=""
     local i
-    for i in $(seq 1 60); do
-      if find_ctr && docker exec "$CTR" herdr status server >/dev/null 2>&1; then
-        return 0
+    # wait up to ~60s: entrypoint syncs extensions before herdr listens,
+    # and a switch must observe the NEW container (old id still answers
+    # while compose is replacing it — returning then caused
+    # server_not_running on the very next workspace/pane call).
+    for i in $(seq 1 120); do
+      CTR="" # force re-query: find_ctr caches
+      if find_ctr; then
+        if [[ $switching -eq 1 && -n "$old_ctr" && "$CTR" == "$old_ctr" ]]; then
+          sleep 0.5
+          continue # still the old container, recreate in flight
+        fi
+        if docker exec "$CTR" herdr status server >/dev/null 2>&1; then
+          # API fully ready (status can succeed before workspace/pane
+          # calls are served — probe once to avoid the race).
+          if docker exec "$CTR" herdr workspace list >/dev/null 2>&1; then
+            return 0
+          fi
+        fi
       fi
-      sleep 0.25
+      sleep 0.5
     done
     die "the herdr server did not come up -- see: docker compose logs"
   fi
@@ -553,6 +599,92 @@ start_pi_in_pane() {
 
 # start a fresh pi session in a new tab of an existing workspace and start
 # pi there with the caller's args. Prints the agent name.
+#
+# --- parallel-session git isolation ----------------------------------------
+# `pi-run <folder> "<prompt>"` on an existing workspace starts a FRESH pi
+# session while the old one keeps running. That fresh session used to start
+# in the SAME checkout: two agents then share one working tree and one
+# branch — they overwrite each other's files, and whoever commits second
+# forks history (parallel lanes that never merge; fixes land on a lane
+# nobody tests). maybe_isolate_worktree prevents that: when the target
+# folder is inside a git repo, the fresh session gets its own worktree on
+# its own branch (agent/<slug>[-N], nested at <repo>/.worktrees/ so it
+# stays inside the /workspace mounts — a sibling directory could fall
+# outside a mount and never reach the host), mirroring
+# container/pi-worktree.sh `create`. Prints
+# "<worktree-host-path>\t<branch>\t<context-note>" for the caller to
+# chdir into and prepend to the prompt; prints nothing and returns 1 when
+# the folder is not a git repo, is already inside a worktree, or anything
+# fails (the caller then falls back to the shared checkout).
+maybe_isolate_worktree() {
+  local abs="$1"; shift
+  command -v git >/dev/null 2>&1 || return 1
+  local root base slug branch path suffix n note ahead behind exclude
+  root="$(git -C "$abs" rev-parse --show-toplevel 2>/dev/null || true)"
+  [[ -n "$root" ]] || return 1
+  # already isolated (inside a linked worktree, whose .git is a file):
+  # nothing to do
+  [[ ! -f "$root/.git" ]] || return 1
+  case "$abs" in
+    "$root/.worktrees/"*) return 1 ;;
+  esac
+  base="$(git -C "$root" branch --show-current 2>/dev/null || true)"
+  [[ -n "$base" ]] || base="HEAD"
+  git -C "$root" rev-parse --verify --quiet "$base^{commit}" >/dev/null 2>&1 || return 1
+  # best-effort fetch: never mutates the checkout, just freshens the
+  # divergence check below (offline hosts skip it silently)
+  git -C "$root" fetch origin --quiet 2>/dev/null || true
+  # slug from the prompt words (pi flags and their values skipped),
+  # short + filesystem-safe
+  local w skip_next=0 words=()
+  for w in "$@"; do
+    if [[ $skip_next -eq 1 ]]; then skip_next=0; continue; fi
+    case "$w" in
+      --provider|--model|-m|--thinking|--timeout|-s|--sandbox) skip_next=1 ;;
+      -*=*) ;;   # --flag=value form: drop
+      -?*) ;;    # bare flag: drop (its value may leak into the slug — harmless)
+      *) words+=("$w") ;;
+    esac
+  done
+  if [[ ${#words[@]} -eq 0 ]]; then
+    slug=""
+  else
+    slug="$(printf '%s ' "${words[@]}" | tr '[:upper:]' '[:lower:]' \
+      | sed 's/[^a-z0-9-]/-/g; s/--*/-/g; s/^-//; s/-$//' \
+      | cut -c1-32 | sed 's/-$//')"
+  fi
+  [[ -n "$slug" ]] || slug="task"
+  n=1
+  while :; do
+    suffix=""; [[ $n -gt 1 ]] && suffix="-$n"
+    branch="agent/${slug}${suffix}"
+    path="$root/.worktrees/${slug}${suffix}"
+    if git -C "$root" show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null \
+       || [[ -e "$path" ]]; then
+      n=$((n + 1))
+    else
+      break
+    fi
+  done
+  # keep nested worktrees out of `git status` in the main checkout
+  exclude="$(git -C "$root" rev-parse --git-common-dir)/info/exclude"
+  if ! grep -qxF '.worktrees/' "$exclude" 2>/dev/null; then
+    mkdir -p "$(dirname "$exclude")" 2>/dev/null || true
+    printf '.worktrees/\n' >> "$exclude" 2>/dev/null || true
+  fi
+  git -C "$root" worktree add -b "$branch" "$path" "$base" >/dev/null 2>&1 || return 1
+  # divergence early warning, so the agent knows when its base is stale
+  note=""
+  if [[ "$base" != "HEAD" ]] && git -C "$root" rev-parse --verify --quiet "refs/remotes/origin/$base" >/dev/null 2>&1; then
+    ahead="$(git -C "$root" rev-list --count "origin/$base..$base" 2>/dev/null || echo 0)"
+    behind="$(git -C "$root" rev-list --count "$base..origin/$base" 2>/dev/null || echo 0)"
+    if [[ "$behind" != "0" ]]; then
+      note=" Local $base is $behind behind origin/$base ($ahead ahead) - run git pull --rebase in the main checkout before merging."
+    fi
+  fi
+  printf 'pi-run: isolated parallel session in worktree %s (branch %s, base %s)\n' "$path" "$branch" "$base" >&2
+  printf '%s\t%s\t%s' "$path" "$branch" "[pi-run: you are in worktree $path on branch $branch (base $base). Stay in this directory for the whole task; set up deps as needed (node_modules/.env are not copied). Commit on this branch and finish with pi-worktree finish ${branch#agent/} (pushes the branch for review). Do not commit to $base from here.$note]"
+}
 new_pi_in_new_tab() {
   local wid="$1" cdir="$2" abs="$3"; shift 3
   local tab_out newpane
@@ -741,7 +873,7 @@ cmd_open() {
 
   ensure_stack
 
-  local abs="" out wid label tentative wabs
+  local abs="" out wid label tentative wabs wt _wt_branch _wt_note
   if [[ "$path" == "." ]] && ! abs="$(host_path . 2>/dev/null)"; then
     # from outside the mounted folders with no path given: just attach
     # wherever the TUI was left (its focused workspace)
@@ -770,6 +902,13 @@ cmd_open() {
       if [[ $# -gt 0 ]]; then
         abs="$(ws_host_path "$label")"
         if [[ -n "$abs" ]]; then
+          # parallel prompt session: isolate it in its own worktree when
+          # the folder is a git repo (two agents sharing one checkout
+          # clobber files and fork history — see maybe_isolate_worktree)
+          if wt="$(maybe_isolate_worktree "$abs" "$@")"; then
+            IFS=$'\t' read -r abs _wt_branch _wt_note <<<"$wt"
+            set -- "$_wt_note" "$@"
+          fi
           "$fresh" "$wid" "$(container_path "$abs")" "$abs" "$@"
         else
           err "note: renamed workspace has no folder mapping, reusing live session"
@@ -788,7 +927,15 @@ cmd_open() {
   if [[ -n "$wid" ]]; then
     if [[ $# -gt 0 ]]; then
       # prompt passed but workspace exists: fresh pi session in a new pane
-      # (or a new tab with --tab), the running session keeps running untouched
+      # (or a new tab with --tab), the running session keeps running untouched.
+      # A parallel session in the SAME checkout would share files/branch
+      # with the running one and fork history — isolate it in its own
+      # worktree when the folder is a git repo (see maybe_isolate_worktree).
+      if wt="$(maybe_isolate_worktree "$abs" "$@")"; then
+        IFS=$'\t' read -r abs _wt_branch _wt_note <<<"$wt"
+        cdir="$(container_path "$abs")"
+        set -- "$_wt_note" "$@"
+      fi
       "$fresh" "$wid" "$cdir" "$abs" "$@"
     fi
   else
