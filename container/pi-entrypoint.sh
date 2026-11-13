@@ -44,6 +44,25 @@ fi
 # dead container are picked up by the next server start on their own.
 mkdir -p /home/pi/.pi/agent/herdr
 
+# ssh-agent forwarding (see docker-compose.yml): the host's agent socket is
+# mounted at $SSH_AUTH_SOCK (/ssh-agent) so git-over-ssh uses the
+# host-unlocked key — no private keys live in the container. Only public
+# host keys are mounted (known_hosts, read-only); seed github.com's keys
+# on first boot so ssh never prompts. Never fatal — git over HTTPS via gh
+# keeps working regardless.
+mkdir -p /home/pi/.ssh 2>/dev/null || true
+chmod 700 /home/pi/.ssh 2>/dev/null || true
+if [[ ! -s /home/pi/.ssh/known_hosts ]]; then
+  ssh-keyscan -t ed25519,ecdsa,rsa github.com >> /home/pi/.ssh/known_hosts 2>/dev/null || true
+fi
+if [[ -n "${SSH_AUTH_SOCK:-}" ]]; then
+  if ! ssh-add -l >/dev/null 2>&1; then
+    echo "pi-entrypoint: note: ssh-agent at \$SSH_AUTH_SOCK=$SSH_AUTH_SOCK has no keys — run \`github-ssh-unlock\` on the host, then git-over-ssh works inside" >&2
+  fi
+else
+  echo "pi-entrypoint: note: no ssh-agent forwarded (\$SSH_AUTH_SOCK unset) — git-over-ssh needs the /ssh-agent mount (see README)" >&2
+fi
+
 # first run: skip herdr's onboarding wizard — the pi integration installed
 # below is exactly what that wizard would set up.
 if [[ ! -e /home/pi/.config/herdr/config.toml ]]; then
