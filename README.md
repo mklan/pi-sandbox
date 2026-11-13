@@ -252,6 +252,24 @@ PI_SANDBOX=android pi-run ~/code/android-app        # sticky for the shell
 pi-run sandboxes                          # list variants + which is built
 ```
 
+Per-workspace default: a `.pi-sandbox` file in the project folder pins the
+sandbox for that folder (searched upward to the mount root, so opening a
+subdir still picks it up):
+
+```bash
+pi-run sandboxes --set android ~/code/android-app   # writes ~/code/android-app/.pi-sandbox
+pi-run ~/code/android-app                            # now uses android, no flag needed
+pi-run sandboxes ~/code/android-app                 # shows the workspace default
+pi-run sandboxes --unset ~/code/android-app         # remove it again
+```
+
+The file holds one line, e.g. `sandbox=android` (`PI_SANDBOX=android`,
+`sandbox: android` and a bare `android` work too). Precedence: the
+`-s`/`--sandbox` flag, then the `PI_SANDBOX` env var, then the workspace
+`.pi-sandbox` file, then `default`. The file is plain text in your project
+— commit it when the whole team should share the default, or git-ignore it
+for a personal choice.
+
 Switching variants recreates the container (one `docker compose build` +
 `up` behind the scenes, automatic via the image stamp) — workspaces, panes
 and pi sessions are restored from the `pi-agent-home` volume, so nothing is

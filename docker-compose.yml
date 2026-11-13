@@ -25,7 +25,8 @@ services:
       dockerfile: container/Dockerfile
       # Image variant: `default` (base alias — the daily driver) or `android`
       # (default + JDK + Android SDK + Gradle + Kotlin). Selected in pi-run
-      # (`pi-run --sandbox android ...`, or PI_SANDBOX=android), which exports
+      # (`pi-run --sandbox android ...`, PI_SANDBOX=android, or the
+      # workspace `.pi-sandbox` file — see `pi-run sandboxes`), which exports
       # PI_SANDBOX_TARGET/SUFFIX — see the stages in container/Dockerfile.
       # Plain `docker compose build` without pi-run builds `default`.
       target: ${PI_SANDBOX_TARGET:-default}

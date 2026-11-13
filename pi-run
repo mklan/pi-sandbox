@@ -8,8 +8,13 @@
 #                                       session in a new pane (or, with --tab,
 #                                       in a new tab); no args
 #                                       reattaches to the running one)
-#   pi-run sandboxes                list the image variants (default,
-#                                       android) and which one is selected
+#   pi-run sandboxes [path]         list the image variants (default,
+#                                       android), which one is selected,
+#                                       and the workspace default (if any)
+#   pi-run sandboxes --set <name> [path]
+#                                       set the workspace default sandbox
+#                                       (writes <path>/.pi-sandbox)
+#   pi-run sandboxes --unset [path]   remove the workspace default
 #   pi-run ls [-w]                    list workspaces and agents (-w: live)
 #   pi-run log <path|name>            show a workspace's current screen
 #   pi-run shell [path|name] [cmd...] bash in the sandbox at the folder
@@ -28,8 +33,12 @@
 # (base Ubuntu + Node.js + Docker CLI) for everyday work, `android` (default
 # + JDK + Android SDK + Gradle + Kotlin) for Kotlin/Android builds. Pick one
 # per invocation (`pi-run -s android ~/code/app`, also `open`/`shell`), or
-# export PI_SANDBOX=android for the whole shell. Switching variants recreates
-# the container (workspaces and pi sessions are restored from the volume).
+# export PI_SANDBOX=android for the whole shell, or set a per-workspace
+# default with a `.pi-sandbox` file in the project folder (see
+# `pi-run sandboxes --set android ~/code/app`). Precedence: -s/--sandbox
+# flag, then PI_SANDBOX env, then the workspace `.pi-sandbox` file, then
+# `default`. Switching variants recreates the container (workspaces and pi
+# sessions are restored from the volume).
 #
 # The sandbox container runs herdr (herdr.dev) as its main process. herdr
 # is a terminal workspace manager for coding agents: one workspace per
@@ -82,13 +91,21 @@ hash4() { printf '%s' "$1" | cksum | awk '{ printf "%04x", $1 % 65536 }'; }
 # --- sandbox (image variant) selection -----------------------------------
 # The image is multi-stage (see container/Dockerfile): `default` for
 # everyday work, `android` for Kotlin/Android builds. Select per invocation
-# (`pi-run -s android ...`, also after `open`/`shell`) or via PI_SANDBOX.
-# This maps to the compose build target + image suffix (see
-# docker-compose.yml) and to the image name ensure_image checks/builds.
+# (`pi-run -s android ...`, also after `open`/`shell`), via PI_SANDBOX, or
+# via a per-workspace `.pi-sandbox` file in the project folder (see below).
+# Precedence: -s/--sandbox flag, then PI_SANDBOX env, then the workspace
+# file, then `default`. This maps to the compose build target + image
+# suffix (see docker-compose.yml) and to the image name ensure_image
+# checks/builds.
 SANDBOX="${PI_SANDBOX:-default}"
+SANDBOX_FROM_CLI=0
 PI_SANDBOX_TARGET="default"
 PI_SANDBOX_SUFFIX=""
 IMAGE="pi-sandbox"
+# Per-workspace default: a `.pi-sandbox` file in the project folder, e.g.
+# `sandbox=android`. Searched upward from the workspace folder to the
+# mount root, so opening a subdir still picks up the project default.
+WORKSPACE_CONFIG_NAME=".pi-sandbox"
 
 select_sandbox() {
   case "$SANDBOX" in
@@ -97,6 +114,76 @@ select_sandbox() {
     *) die "unknown sandbox: $SANDBOX (want default|android)" ;;
   esac
   export PI_SANDBOX_TARGET PI_SANDBOX_SUFFIX
+}
+
+# print the `.pi-sandbox` file for a host dir (searching upward to the
+# mount root), or nothing when there is none
+workspace_config_file() {
+  local dir="$1" cur cfg
+  cur="$(realpath -m "$dir")"
+  while :; do
+    cfg="$cur/$WORKSPACE_CONFIG_NAME"
+    if [[ -f "$cfg" ]]; then printf '%s' "$cfg"; return 0; fi
+    # stop above the mounted folders (host_path fails outside them)
+    local parent m
+    parent="$(dirname "$cur")"
+    [[ "$parent" == "$cur" ]] && return 0
+    m="$(mount_for_host "$parent" 2>/dev/null || true)"
+    [[ -n "$m" ]] || return 0
+    cur="$parent"
+  done
+}
+
+# print the sandbox named in a workspace dir's config file (empty = none).
+# Accepted lines (last match wins; `#` comments and blanks ignored):
+#   sandbox=android | PI_SANDBOX=android | sandbox: android | android
+read_workspace_sandbox() {
+  local dir="$1" cfg line val="" low
+  cfg="$(workspace_config_file "$dir")"
+  [[ -n "$cfg" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="$(printf '%s' "$line" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    line="$(printf '%s' "$line" | sed 's/[[:space:]]*#.*$//; s/[[:space:]]*$//')"
+    [[ -z "$line" ]] && continue
+    low="$(printf '%s' "$line" | tr '[:upper:]' '[:lower:]')"
+    if [[ "$low" =~ ^pi_sandbox[[:space:]]*[:=][[:space:]]*(.+)$ ]]; then
+      val="${BASH_REMATCH[1]}"
+    elif [[ "$low" =~ ^sandbox[[:space:]]*[:=][[:space:]]*(.+)$ ]]; then
+      val="${BASH_REMATCH[1]}"
+    elif [[ "$low" =~ ^(default|android)$ ]]; then
+      val="$low"
+    else
+      continue
+    fi
+  done < "$cfg"
+  val="$(printf '%s' "$val" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/^"//; s/"$//')"
+  # strip matching single quotes (kept out of the sed above for quoting)
+  val="${val%\'}"
+  val="${val#\'}"
+  [[ -z "$val" ]] && return 0
+  case "$val" in
+    default|android) printf '%s' "$val" ;;
+    *) err "ignoring unknown sandbox '$val' in $cfg (want default|android)" ;;
+  esac
+  return 0
+}
+
+# apply the workspace file default for a host dir unless the user already
+# picked a sandbox explicitly (flag or env). Prints the source on change.
+maybe_apply_workspace_sandbox() {
+  local dir="$1" from_cfg cfg
+  [[ $SANDBOX_FROM_CLI -eq 0 ]] || return 1
+  [[ -z "${PI_SANDBOX:-}" ]] || return 1
+  from_cfg="$(read_workspace_sandbox "$dir")" || true
+  [[ -n "$from_cfg" ]] || return 1
+  if [[ "$from_cfg" != "$SANDBOX" ]]; then
+    SANDBOX="$from_cfg"
+    select_sandbox
+    cfg="$(workspace_config_file "$dir")"
+    echo "using $SANDBOX sandbox (from $cfg)"
+  fi
+  return 0
 }
 
 # --- workspace mounts ----------------------------------------------------
@@ -283,8 +370,23 @@ require_stack() {
 # start (or resume) the container and wait until herdr accepts commands
 ensure_stack() {
   ensure_image
+  local need_up=0 reason=""
   if ! find_ctr || ! docker exec "$CTR" herdr status server >/dev/null 2>&1; then
-    echo "starting the sandbox container (herdr keeps everything running)..."
+    need_up=1
+    reason="starting the sandbox container (herdr keeps everything running)..."
+  else
+    # one container serves one variant: recreate when the running image
+    # is not the selected sandbox (e.g. a workspace `.pi-sandbox` file
+    # points elsewhere). Workspaces and pi sessions restore from the volume.
+    local cur_img
+    cur_img="$(docker inspect "$CTR" --format '{{.Config.Image}}' 2>/dev/null || true)"
+    if [[ -n "$cur_img" && "$cur_img" != "$IMAGE" ]]; then
+      need_up=1
+      reason="switching sandbox to $SANDBOX (was $cur_img) -- recreating the container (workspaces restore from the volume)..."
+    fi
+  fi
+  if [[ $need_up -eq 1 ]]; then
+    echo "$reason"
     compose up -d >/dev/null || die "cannot start the sandbox container"
     CTR=""
     local i
@@ -294,7 +396,7 @@ ensure_stack() {
       fi
       sleep 0.25
     done
-    die "the herdr server did not come up — see: docker compose logs"
+    die "the herdr server did not come up -- see: docker compose logs"
   fi
 }
 
@@ -531,7 +633,49 @@ jump_to() {
 }
 
 cmd_sandboxes() {
-  local cur="$SANDBOX" s img mark present desc
+  local set_val="" unset_cfg=0 arg="" cur s img mark present desc
+  while :; do
+    case "${1:-}" in
+      --set) [[ $# -ge 2 ]] || die "missing value for --set (want default|android)"; set_val="$2"; shift 2 ;;
+      --set=*) set_val="${1#--set=}"; shift ;;
+      -s|--sandbox) [[ $# -ge 2 ]] || die "missing value for $1 (want default|android)"; SANDBOX="$2"; SANDBOX_FROM_CLI=1; shift 2 ;;
+      --sandbox=*) SANDBOX="${1#--sandbox=}"; SANDBOX_FROM_CLI=1; shift ;;
+      --unset) unset_cfg=1; shift ;;
+      --) shift; break ;;
+      -*) die "unknown flag for sandboxes: $1 (want --set <name> | --unset | [path])" ;;
+      *) break ;;
+    esac
+  done
+  if [[ $# -gt 0 ]]; then arg="$1"; shift; fi
+  [[ $# -eq 0 ]] || die "too many arguments for sandboxes (want [path])"
+  if [[ -n "$set_val" && $unset_cfg -eq 1 ]]; then
+    die "cannot combine --set and --unset"
+  fi
+  case "$set_val" in
+    ""|default|android) ;;
+    *) die "unknown sandbox: $set_val (want default|android)" ;;
+  esac
+  select_sandbox
+  cur="$SANDBOX"
+  if [[ -n "$set_val" || $unset_cfg -eq 1 ]]; then
+    # write or remove the per-workspace default: <workspace>/.pi-sandbox
+    local target="${arg:-.}" abs cfg
+    abs="$(host_path "$target")" || exit 1
+    cfg="$abs/$WORKSPACE_CONFIG_NAME"
+    if [[ -n "$set_val" ]]; then
+      printf '# pi sandbox default for this workspace (used by pi-run).\n# Precedence: -s/--sandbox flag, then PI_SANDBOX env, then this file.\nsandbox=%s\n' "$set_val" >"$cfg"         || die "cannot write $cfg"
+      echo "workspace default sandbox for $abs: $set_val (wrote $cfg)"
+      return 0
+    else
+      if [[ -f "$cfg" ]]; then
+        rm -f "$cfg" || die "cannot remove $cfg"
+        echo "removed workspace default sandbox ($cfg)"
+      else
+        echo "no workspace default sandbox set for $abs (no $cfg)"
+      fi
+      return 0
+    fi
+  fi
   printf '%-10s %-22s %-9s %s\n' SANDBOX IMAGE BUILT DESCRIPTION
   for s in default android; do
     img="pi-sandbox"
@@ -547,6 +691,20 @@ cmd_sandboxes() {
   done
   echo
   echo "* selected (PI_SANDBOX=$cur). Use: pi-run -s android <path>  (or PI_SANDBOX=android pi-run <path>)"
+  # per-workspace default for the given path (or cwd when resolvable)
+  local wp="${arg:-.}" wabs wcfg wval
+  if wabs="$(host_path "$wp" 2>/dev/null)"; then
+    wcfg="$(workspace_config_file "$wabs")"
+    if [[ -n "$wcfg" ]]; then
+      wval="$(read_workspace_sandbox "$wabs")"
+      echo "workspace default for $wabs: ${wval:-<invalid, see warning>} (from $wcfg)"
+    else
+      echo "workspace default for $wabs: none (no $WORKSPACE_CONFIG_NAME file)"
+    fi
+    echo "set it with: pi-run sandboxes --set <default|android> [$wp]"
+  elif [[ -n "$arg" ]]; then
+    echo "workspace default: (could not resolve '$arg' to a mounted folder)"
+  fi
 }
 
 cmd_open() {
@@ -555,8 +713,8 @@ cmd_open() {
     case "${1:-}" in
       -b|--background) bg=1 ;;
       --tab|--new-window) newtab=1 ;;
-      -s|--sandbox) [[ $# -ge 2 ]] || die "missing value for $1 (want default|android)"; SANDBOX="$2"; shift ;;
-      --sandbox=*) SANDBOX="${1#--sandbox=}" ;;
+      -s|--sandbox) [[ $# -ge 2 ]] || die "missing value for $1 (want default|android)"; SANDBOX="$2"; SANDBOX_FROM_CLI=1; shift ;;
+      --sandbox=*) SANDBOX="${1#--sandbox=}"; SANDBOX_FROM_CLI=1 ;;
       *) break ;;
     esac
     shift
@@ -571,9 +729,19 @@ cmd_open() {
     path="."
   fi
 
+  # per-workspace default (when the path resolves to a folder without
+  # needing the container); workspace ids/names are re-checked below
+  # after ws_resolve, once their folder is known
+  if [[ "$path" == /* || "$path" == .* || "$path" == "~"* || "$path" != -* ]]; then
+    tentative="$(host_path "$path" 2>/dev/null || true)"
+    if [[ -n "${tentative:-}" ]]; then
+      maybe_apply_workspace_sandbox "$tentative" || true
+    fi
+  fi
+
   ensure_stack
 
-  local abs="" out wid label
+  local abs="" out wid label tentative wabs
   if [[ "$path" == "." ]] && ! abs="$(host_path . 2>/dev/null)"; then
     # from outside the mounted folders with no path given: just attach
     # wherever the TUI was left (its focused workspace)
@@ -591,6 +759,14 @@ cmd_open() {
       # not a folder — a workspace id (w3) or name, then
       out="$(ws_resolve "$path")" || exit 1
       IFS=$'\t' read -r wid label <<<"$out"
+      wabs="$(ws_host_path "$label" 2>/dev/null || true)"
+      if [[ -n "${wabs:-}" ]]; then
+        if maybe_apply_workspace_sandbox "$wabs" || true; then
+          : # maybe_apply already re-ran select_sandbox on change
+        fi
+        # recreate when the workspace file points at another variant
+        ensure_stack
+      fi
       if [[ $# -gt 0 ]]; then
         abs="$(ws_host_path "$label")"
         if [[ -n "$abs" ]]; then
@@ -677,14 +853,29 @@ cmd_log() {
 cmd_shell() {
   while :; do
     case "${1:-}" in
-      -s|--sandbox) [[ $# -ge 2 ]] || die "missing value for $1 (want default|android)"; SANDBOX="$2"; shift 2 ;;
-      --sandbox=*) SANDBOX="${1#--sandbox=}"; shift ;;
+      -s|--sandbox) [[ $# -ge 2 ]] || die "missing value for $1 (want default|android)"; SANDBOX="$2"; SANDBOX_FROM_CLI=1; shift 2 ;;
+      --sandbox=*) SANDBOX="${1#--sandbox=}"; SANDBOX_FROM_CLI=1; shift ;;
       *) break ;;
     esac
   done
   select_sandbox
+  local arg="${1:-}" out wid label abs cdir tentative
+  if [[ $# -gt 0 && "$1" != -* ]]; then
+    # tentative target (may be a folder, name or id)
+    if tentative="$(host_path "$1" 2>/dev/null || true)"; then
+      if [[ -n "${tentative:-}" ]]; then
+        maybe_apply_workspace_sandbox "$tentative" || true
+      fi
+    fi
+  else
+    arg="."
+    if tentative="$(host_path . 2>/dev/null || true)"; then
+      if [[ -n "${tentative:-}" ]]; then
+        maybe_apply_workspace_sandbox "$tentative" || true
+      fi
+    fi
+  fi
   ensure_stack
-  local arg="${1:-}" out wid label abs cdir
   if [[ $# -gt 0 && "$1" != -* ]]; then
     shift
   else
@@ -694,6 +885,10 @@ cmd_shell() {
     IFS=$'\t' read -r wid label <<<"$out"
     abs="$(ws_host_path "$label")"
     [[ -n "$abs" ]] || die "no folder recorded for workspace $label"
+    if maybe_apply_workspace_sandbox "$abs" || true; then
+      : # maybe_apply already re-ran select_sandbox on change
+    fi
+    ensure_stack
   else
     abs="$(host_path "$arg")" || exit 1
   fi
@@ -910,8 +1105,8 @@ cmd_upgrade_docker() {
 # never be mistaken for this flag; `open`/`shell` also accept it later)
 while :; do
   case "${1:-}" in
-    -s|--sandbox) [[ $# -ge 2 ]] || die "missing value for $1 (want default|android)"; SANDBOX="$2"; shift 2 ;;
-    --sandbox=*) SANDBOX="${1#--sandbox=}"; shift ;;
+    -s|--sandbox) [[ $# -ge 2 ]] || die "missing value for $1 (want default|android)"; SANDBOX="$2"; SANDBOX_FROM_CLI=1; shift 2 ;;
+    --sandbox=*) SANDBOX="${1#--sandbox=}"; SANDBOX_FROM_CLI=1; shift ;;
     *) break ;;
   esac
 done

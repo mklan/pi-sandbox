@@ -48,7 +48,8 @@ zip/unzip, file, plus Google Chrome (browser tests), Node.js, the Docker
 CLI and the pi/vibeflow CLIs; the `android` sandbox adds OpenJDK 17, the
 Android SDK, Gradle and Kotlin —
 see README.md "Image variants". The host picks the sandbox (`pi-run
--s android ...` / `PI_SANDBOX=android`); you cannot switch it from in
+-s android ...` / `PI_SANDBOX=android` / a `.pi-sandbox` file in the
+project folder); you cannot switch it from in
 here. If you
 need anything else:
 

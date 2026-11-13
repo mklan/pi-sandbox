@@ -8,6 +8,9 @@
 # PI_SANDBOX=android; for a sticky machine default, add it to the
 # (git-ignored) .env file next to docker-compose.yml instead:
 #   PI_SANDBOX=android
+# For a per-project default instead, keep a `.pi-sandbox` file in the
+# project folder (`pi-run sandboxes --set android ~/code/app`) — the flag
+# and PI_SANDBOX still win over it when given.
 
 services:
   pi:
