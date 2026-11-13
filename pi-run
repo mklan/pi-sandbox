@@ -535,7 +535,7 @@ cmd_sandboxes() {
   printf '%-10s %-22s %-9s %s\n' SANDBOX IMAGE BUILT DESCRIPTION
   for s in default android; do
     img="pi-sandbox"
-    desc="Ubuntu base + Node.js + Docker CLI (everyday work)"
+    desc="Ubuntu base + Node.js + Docker CLI + pi/vibeflow (everyday work)"
     if [[ "$s" == android ]]; then
       img="pi-sandbox-android"
       desc="default + JDK + Android SDK + Gradle + Kotlin (Kotlin/Android builds)"

@@ -44,9 +44,9 @@ unless the user asks.
 
 The image ships common tooling: git, gh (GitHub CLI), ripgrep (rg), fd,
 curl, jq, less, procps, python3, make, g++, openssh-client, tmux,
-zip/unzip, file, plus Google Chrome (browser tests). The `default`
-sandbox adds Node.js, the Docker CLI and the pi/vibeflow CLIs; the
-`android` sandbox adds OpenJDK 17, the Android SDK, Gradle and Kotlin —
+zip/unzip, file, plus Google Chrome (browser tests), Node.js, the Docker
+CLI and the pi/vibeflow CLIs; the `android` sandbox adds OpenJDK 17, the
+Android SDK, Gradle and Kotlin —
 see README.md "Image variants". The host picks the sandbox (`pi-run
 -s android ...` / `PI_SANDBOX=android`); you cannot switch it from in
 here. If you

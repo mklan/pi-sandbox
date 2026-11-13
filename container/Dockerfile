@@ -3,11 +3,15 @@
 # Build from the repository root:  docker compose build  (or pi-run)
 #
 # Stages:
-#   base    — Ubuntu LTS + the general tooling every sandbox needs: git,
-#             gh, curl/jq/ripgrep/fd, ssh client, Chrome (browser tests),
-#             herdr, the pi user, pi-install, entrypoint and helpers.
-#   default — base + Node.js + Docker CLI/compose plugin + the pi and
-#             vibeflow CLIs + preinstalled pi extensions. The daily driver.
+#   base    — Ubuntu LTS + everything every sandbox needs: general tooling
+#             (git, gh, curl/jq/ripgrep/fd, ssh client, Chrome for browser
+#             tests), Node.js (pi/vibeflow are Node apps, so the runtime
+#             lives here too), Docker CLI/compose plugin, herdr, the pi and
+#             vibeflow CLIs + preinstalled pi extensions, the pi user,
+#             pi-install, entrypoint and helpers.
+#   default — base alias (kept as the `pi-sandbox` build target for
+#             backwards compatibility; adds nothing — Node.js already lives
+#             in base because pi/vibeflow need it at runtime).
 #   android — default + OpenJDK + Android SDK + Gradle + Kotlin: builds
 #             Kotlin/Android apps (assembleDebug/lint/test, no emulator
 #             system images — run the emulator on the host).
@@ -44,7 +48,7 @@ ARG ANDROID_CMDLINE_TOOLS=11076708
 ARG ANDROID_BUILD_TOOLS=34.0.0
 ARG ANDROID_PLATFORM=android-34
 
-# === base: Ubuntu + general sandbox tooling ==============================
+# === base: Ubuntu + everything every sandbox needs =========================
 FROM ubuntu:${UBUNTU_VERSION} AS base
 
 # --- apt packages (one per line, keep alphabetical) ----------------------
@@ -106,6 +110,56 @@ RUN set -e; \
   else \
     useradd --uid "${USER_UID}" --gid "${USER_GID}" --create-home --shell /bin/bash pi; \
   fi
+
+# --- Node.js (our main stack — and pi/vibeflow's runtime) ----------------
+# From the official tarball, pinned via NODE_VERSION for reproducible
+# builds; bump with `pi-run upgrade-node`. Installed system-wide so
+# node/npm/npx work for root and pi alike (global npm packages land in
+# /usr/local). Lives in base because the pi and vibeflow CLIs below are
+# Node apps and need it at runtime.
+ARG NODE_VERSION
+RUN set -e; \
+  arch="$(dpkg --print-architecture)"; \
+  case "$arch" in amd64) node_arch=x64 ;; arm64) node_arch=arm64 ;; \
+    *) echo "node: unsupported architecture: $arch" >&2; exit 1 ;; esac; \
+  cd /tmp; \
+  curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.xz"; \
+  curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt"; \
+  grep "node-v${NODE_VERSION}-linux-${node_arch}.tar.xz" SHASUMS256.txt | sha256sum -c -; \
+  tar -xJf "node-v${NODE_VERSION}-linux-${node_arch}.tar.xz" -C /usr/local --strip-components=1; \
+  rm -f "node-v${NODE_VERSION}-linux-${node_arch}.tar.xz" SHASUMS256.txt; \
+  node --version && npm --version
+
+# --- Docker CLI + compose plugin (host daemon via socket) ----------------
+# No dockerd inside: a privileged DinD daemon would void the sandbox
+# hardening (see README.md). Instead the CLI talks to the host daemon
+# through a bind-mounted /var/run/docker.sock (opt-in per machine, see
+# docker-compose.yml) — the devcontainer-standard docker-outside-of-docker
+# setup, enough for agents to build images and run e2e stacks.
+# Pinned like everything else; bump with `pi-run upgrade-docker` /
+# `pi-run upgrade-compose`.
+ARG DOCKER_VERSION
+ARG COMPOSE_VERSION
+ARG DOCKER_GID
+RUN set -e; \
+  arch="$(dpkg --print-architecture)"; \
+  case "$arch" in amd64) docker_arch=x86_64 ;; arm64) docker_arch=aarch64 ;; \
+    *) echo "docker: unsupported architecture: $arch" >&2; exit 1 ;; esac; \
+  cd /tmp; \
+  curl -fsSLO "https://download.docker.com/linux/static/stable/${docker_arch}/docker-${DOCKER_VERSION}.tgz"; \
+  tar -xzf "docker-${DOCKER_VERSION}.tgz" -C /tmp; \
+  mv /tmp/docker/docker /usr/local/bin/docker; \
+  rm -rf "docker-${DOCKER_VERSION}.tgz" /tmp/docker; \
+  mkdir -p /usr/local/lib/docker/cli-plugins; \
+  curl -fsSL "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-linux-${docker_arch}" \
+    -o /usr/local/lib/docker/cli-plugins/docker-compose; \
+  chmod 0755 /usr/local/bin/docker /usr/local/lib/docker/cli-plugins/docker-compose; \
+  docker --version && docker compose version; \
+  if getent group docker >/dev/null; then echo "docker group exists"; \
+  elif getent group "${DOCKER_GID}" >/dev/null; then \
+    echo "ERROR: GID ${DOCKER_GID} is taken by another group — rebuild with --build-arg DOCKER_GID=<host docker gid>" >&2; exit 1; \
+  else groupadd --gid "${DOCKER_GID}" docker; fi; \
+  usermod -aG docker pi
 
 # --- preinstall herdr (terminal runtime for coding agents) ----------------
 # herdr runs every terminal in this container (see container/AGENTS.md) and
@@ -189,58 +243,8 @@ RUN mkdir -p /home/pi/.config \
 # same setup per-user, but ~/.gitconfig itself is container-local.
 RUN git config --system credential.helper '!gh auth git-credential'
 
-# === default: base + Node.js + Docker CLI + pi/vibeflow ==================
-FROM base AS default
-
-# --- Node.js (our main stack) from the official tarball ------------------
-# Pinned via NODE_VERSION for reproducible builds; bump with
-# `pi-run upgrade-node`. Installed system-wide so node/npm/npx work for
-# root and pi alike (global npm packages land in /usr/local).
-ARG NODE_VERSION
-RUN set -e; \
-  arch="$(dpkg --print-architecture)"; \
-  case "$arch" in amd64) node_arch=x64 ;; arm64) node_arch=arm64 ;; \
-    *) echo "node: unsupported architecture: $arch" >&2; exit 1 ;; esac; \
-  cd /tmp; \
-  curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.xz"; \
-  curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt"; \
-  grep "node-v${NODE_VERSION}-linux-${node_arch}.tar.xz" SHASUMS256.txt | sha256sum -c -; \
-  tar -xJf "node-v${NODE_VERSION}-linux-${node_arch}.tar.xz" -C /usr/local --strip-components=1; \
-  rm -f "node-v${NODE_VERSION}-linux-${node_arch}.tar.xz" SHASUMS256.txt; \
-  node --version && npm --version
-
-# --- Docker CLI + compose plugin (host daemon via socket) ----------------
-# No dockerd inside: a privileged DinD daemon would void the sandbox
-# hardening (see README.md). Instead the CLI talks to the host daemon
-# through a bind-mounted /var/run/docker.sock (opt-in per machine, see
-# docker-compose.yml) — the devcontainer-standard docker-outside-of-docker
-# setup, enough for agents to build images and run e2e stacks.
-# Pinned like everything else; bump with `pi-run upgrade-docker` /
-# `pi-run upgrade-compose`.
-ARG DOCKER_VERSION
-ARG COMPOSE_VERSION
-ARG DOCKER_GID
-RUN set -e; \
-  arch="$(dpkg --print-architecture)"; \
-  case "$arch" in amd64) docker_arch=x86_64 ;; arm64) docker_arch=aarch64 ;; \
-    *) echo "docker: unsupported architecture: $arch" >&2; exit 1 ;; esac; \
-  cd /tmp; \
-  curl -fsSLO "https://download.docker.com/linux/static/stable/${docker_arch}/docker-${DOCKER_VERSION}.tgz"; \
-  tar -xzf "docker-${DOCKER_VERSION}.tgz" -C /tmp; \
-  mv /tmp/docker/docker /usr/local/bin/docker; \
-  rm -rf "docker-${DOCKER_VERSION}.tgz" /tmp/docker; \
-  mkdir -p /usr/local/lib/docker/cli-plugins; \
-  curl -fsSL "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-linux-${docker_arch}" \
-    -o /usr/local/lib/docker/cli-plugins/docker-compose; \
-  chmod 0755 /usr/local/bin/docker /usr/local/lib/docker/cli-plugins/docker-compose; \
-  docker --version && docker compose version; \
-  if getent group docker >/dev/null; then echo "docker group exists"; \
-  elif getent group "${DOCKER_GID}" >/dev/null; then \
-    echo "ERROR: GID ${DOCKER_GID} is taken by another group — rebuild with --build-arg DOCKER_GID=<host docker gid>" >&2; exit 1; \
-  else groupadd --gid "${DOCKER_GID}" docker; fi; \
-  usermod -aG docker pi
-
 # --- preinstall pi -------------------------------------------------------
+# Node app, so Node.js above is its runtime. Pinned like everything else.
 ARG PI_VERSION
 RUN npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@${PI_VERSION}"
 
@@ -264,6 +268,13 @@ RUN chmod 0755 /usr/local/bin/pi-extensions-sync \
 USER pi
 RUN /usr/local/bin/pi-extensions-sync
 USER root
+
+# === default: base alias (adds nothing) ===================================
+# Kept as the `pi-sandbox` build target so existing compose files, pi-run
+# and docs keep working. Node.js, Docker CLI, pi/vibeflow and extensions
+# all live in base now (pi/vibeflow are Node apps, so the runtime belongs
+# there too); this stage exists only as a named alias for the daily driver.
+FROM base AS default
 
 # --- image stamp (pi-run rebuilds when this no longer matches) -----------
 ARG PI_STAMP=unstamped

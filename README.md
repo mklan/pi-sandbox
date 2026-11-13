@@ -237,8 +237,8 @@ toolchain officially supports):
 
 | Stage / sandbox | Contents | Image |
 |---|---|---|
-| `base` | Ubuntu + general tooling every sandbox needs: git, gh, curl/jq/ripgrep/fd, ssh client, Chrome (browser tests), herdr, pi user, pi-install, entrypoint, helpers | build layer only (never run directly) |
-| `default` | base + Node.js + Docker CLI/compose plugin + pi and vibeflow CLIs + preinstalled pi extensions — the daily driver | `pi-sandbox` |
+| `base` | Ubuntu + everything every sandbox needs: general tooling (git, gh, curl/jq/ripgrep/fd, ssh client, Chrome for browser tests), Node.js, Docker CLI/compose plugin, herdr, pi and vibeflow CLIs + preinstalled pi extensions, pi user, pi-install, entrypoint, helpers | build layer only (never run directly) |
+| `default` | base alias — adds nothing (kept as the `pi-sandbox` build target; Node.js lives in base because pi/vibeflow are Node apps) — the daily driver | `pi-sandbox` |
 | `android` | default + OpenJDK 17 + Android SDK (cmdline-tools, platform-tools, one platform + build-tools, licences pre-accepted) + Gradle + Kotlin — builds Kotlin/Android apps (`gradle assembleDebug`, lint, unit tests) | `pi-sandbox-android` |
 
 Pick the sandbox per invocation, or export it for the whole shell:
@@ -271,10 +271,12 @@ Notes for the android sandbox:
 
 ## Docker for e2e tests
 
-The `default` stage layers our main stack on top of the base: Node.js from
+The `base` stage layers our main stack on top of Ubuntu: Node.js from
 the official tarball (`ARG NODE_VERSION`), plus the Docker CLI and the
 compose plugin as pinned static binaries (`ARG DOCKER_VERSION`, `ARG
-COMPOSE_VERSION`). Bump them with:
+COMPOSE_VERSION`), the pi and vibeflow CLIs and the preinstalled pi
+extensions. (`default` is a bare alias of base, so these live in every
+sandbox.) Bump them with:
 
 ```bash
 pi-run upgrade-node       # newest Node v24.x, or: pi-run upgrade-node 24.22.2

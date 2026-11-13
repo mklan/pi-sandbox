@@ -23,7 +23,7 @@ services:
     build:
       context: .
       dockerfile: container/Dockerfile
-      # Image variant: `default` (base + Node.js + Docker CLI) or `android`
+      # Image variant: `default` (base alias — the daily driver) or `android`
       # (default + JDK + Android SDK + Gradle + Kotlin). Selected in pi-run
       # (`pi-run --sandbox android ...`, or PI_SANDBOX=android), which exports
       # PI_SANDBOX_TARGET/SUFFIX — see the stages in container/Dockerfile.
